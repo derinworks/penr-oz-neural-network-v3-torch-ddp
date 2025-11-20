@@ -1,0 +1,8 @@
+[run]
+omit =
+    */test_*.py
+    */_remote_module_non_scriptable.py
+    /tmp/*
+
+[report]
+fail_under = 80

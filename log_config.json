@@ -1,0 +1,38 @@
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s - %(name)s - %(processName)s - %(levelname)s - %(message)s",
+            "datefmt": "%Y-%m-%dT%H:%M:%S"
+        }
+    },
+    "handlers": {
+        "default": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "default"
+        }
+    },
+    "loggers": {
+        "uvicorn": {
+            "level": "INFO",
+            "handlers": ["default"],
+            "propagate": false
+        },
+        "uvicorn.error": {
+            "level": "INFO",
+            "handlers": ["default"],
+            "propagate": false
+        },
+        "uvicorn.access": {
+            "level": "INFO",
+            "handlers": ["default"],
+            "propagate": false
+        }
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["default"]
+    }
+}

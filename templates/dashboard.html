@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Neural Network Model Dashboard</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <script src="/static/chart-4.4.1.umd.min.js"></script>
+    <script src="/static/dashboard.js" defer></script>
+</head>
+<body>
+    <h1>Neural Network Model Dashboard</h1>
+    <p><a href="/docs">Go to API Docs</a></p>
+
+    <div>
+        <label for="model-id">Model ID:</label>
+        <input type="text" id="model-id" placeholder="Enter model ID" />
+        <label for="layer-filter" style="margin-left: 1em;">Layer Filter:</label>
+        <input type="text" id="layer-filter" placeholder="e.g. tanh, relu or 0, 1 etc." />
+        <button onclick="refresh()">Refresh</button>
+    </div>
+
+    <div id="data-container"></div>
+</body>
+</html>
