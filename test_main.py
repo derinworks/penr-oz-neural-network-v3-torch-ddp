@@ -149,7 +149,10 @@ def test_generate_endpoint(mock_deserialized_model, input_context, block_size, m
 
     assert response.status_code == 200
 
-def test_train_endpoint(mock_deserialized_model):
+@patch("main.create_task")
+def test_train_endpoint(mock_create_task, mock_deserialized_model):
+    # Prevent creating a real background task and avoid 'coroutine was never awaited' warnings
+    mock_create_task.side_effect = lambda coro: coro.close()
     payload = {
         "model_id": "test",
         "dataset_id": "mock_ds",
@@ -163,6 +166,7 @@ def test_train_endpoint(mock_deserialized_model):
 
     assert response.status_code == 202
     assert response.json() == {"message": "Training for model test started asynchronously."}
+    mock_create_task.assert_called_once()
 
 def test_train_endpoint_returns_409_when_already_locked(mock_deserialized_model):
     payload = {
@@ -188,7 +192,10 @@ def test_train_endpoint_returns_409_when_already_locked(mock_deserialized_model)
     # Clean up after test
     del model_locks["test"]
 
-def test_train_endpoint_with_gzip(mock_deserialized_model):
+@patch("main.create_task")
+def test_train_endpoint_with_gzip(mock_create_task, mock_deserialized_model):
+    # Prevent creating a real background task and avoid 'coroutine was never awaited' warnings
+    mock_create_task.side_effect = lambda coro: coro.close()
     payload = {
         "model_id": "test",
         "dataset_id": "mock_ds",
@@ -205,6 +212,7 @@ def test_train_endpoint_with_gzip(mock_deserialized_model):
 
     assert response.status_code == 202
     assert response.json() == {"message": "Training for model test started asynchronously."}
+    mock_create_task.assert_called_once()
 
 def test_progress_endpoint(mock_deserialized_model):
     mock_deserialized_model.progress = [
@@ -288,6 +296,115 @@ def test_delete_model_endpoint(mock_delete_model):
     assert response.status_code == 204
 
     mock_delete_model.assert_called_once()
+
+@patch("main.Loader")
+def test_list_dataset_endpoint(mock_loader_class):
+    mock_loader = MagicMock()
+    mock_loader_class.return_value = mock_loader
+    mock_loader.list.return_value = ["shard1.npy", "shard2.npy"]
+    
+    response = client.get("/dataset/", params={"dataset_id": "test_dataset"})
+    
+    assert response.status_code == 200
+    assert response.json() == {"files": ["shard1.npy", "shard2.npy"]}
+    mock_loader_class.assert_called_once_with("test_dataset")
+
+@patch("main.create_task")
+@patch("main.Downloader")
+def test_download_dataset_endpoint(mock_downloader_class, mock_create_task):
+    # Prevent creating a real background task and avoid 'coroutine was never awaited' warnings
+    mock_create_task.side_effect = lambda coro: coro.close()
+    mock_downloader = MagicMock()
+    mock_downloader_class.return_value = mock_downloader
+    
+    payload = {
+        "dataset_id": "test_ds",
+        "path": "org/dataset",
+        "name": "default",
+        "split": "train",
+        "shard_size": 100000,
+        "encoding": "gpt2"
+    }
+    
+    response = client.post("/dataset/", json=payload)
+    
+    assert response.status_code == 202
+    assert response.json() == {"message": "Downloading Dataset test_ds asynchronously."}
+    mock_create_task.assert_called_once()
+
+@patch("main.Downloader")
+def test_download_dataset_returns_409_when_already_locked(mock_downloader_class):
+    from main import dataset_locks
+    
+    mock_downloader = MagicMock()
+    mock_downloader_class.return_value = mock_downloader
+    
+    payload = {
+        "dataset_id": "test_ds_locked",
+        "path": "org/dataset",
+        "name": "default",
+        "split": "train",
+        "shard_size": 100000,
+        "encoding": "gpt2"
+    }
+    
+    lock = asyncio.Lock()
+    dataset_locks["test_ds_locked"] = lock
+    # Manually acquire the lock
+    asyncio.run(lock.acquire())
+    
+    # Now when we send request, it should see lock.locked() == True
+    response = client.post("/dataset/", json=payload)
+    
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Downloading dataset test_ds_locked already in progress."}
+    
+    # Clean up after test
+    del dataset_locks["test_ds_locked"]
+
+@patch("main.Loader")
+def test_delete_dataset_endpoint(mock_loader_class):
+    mock_loader = MagicMock()
+    mock_loader_class.return_value = mock_loader
+    
+    response = client.delete("/dataset/", params={"dataset_id": "test_dataset"})
+    
+    assert response.status_code == 204
+    mock_loader.delete.assert_called_once()
+
+@patch("main.Tokenizer")
+def test_tokenize_endpoint(mock_tokenizer_class):
+    mock_tokenizer = MagicMock()
+    mock_tokenizer_class.return_value = mock_tokenizer
+    mock_tokenizer.tokenize.return_value = [1, 2, 3, 4]
+    
+    payload = {
+        "encoding": "gpt2",
+        "text": "Hello world"
+    }
+    
+    response = client.post("/tokenize/", json=payload)
+    
+    assert response.status_code == 200
+    assert response.json() == {"encoding": "gpt2", "tokens": [1, 2, 3, 4]}
+    mock_tokenizer.tokenize.assert_called_once_with("Hello world")
+
+@patch("main.Tokenizer")
+def test_decode_endpoint(mock_tokenizer_class):
+    mock_tokenizer = MagicMock()
+    mock_tokenizer_class.return_value = mock_tokenizer
+    mock_tokenizer.decode.return_value = "Hello world"
+    
+    payload = {
+        "encoding": "gpt2",
+        "tokens": [1, 2, 3, 4]
+    }
+    
+    response = client.post("/decode/", json=payload)
+    
+    assert response.status_code == 200
+    assert response.json() == {"encoding": "gpt2", "text": "Hello world"}
+    mock_tokenizer.decode.assert_called_once_with([1, 2, 3, 4])
 
 if __name__ == "__main__":
     import pytest

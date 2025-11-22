@@ -75,16 +75,38 @@ Diagnose model training at [http://127.0.0.1:8000/dashboard](http://127.0.0.1:80
 
 To ensure code quality and maintainability, follow these steps to run tests and check code coverage:
 
-1. **Run Tests with Coverage**:
+1. **Run All Tests**:
+   ```bash
+   python -m pytest -v
+   ```
+   The test suite includes 114 tests across 7 test files:
+   - `test_main.py` - API endpoint tests (29 tests)
+   - `test_neural_net_model.py` - Model implementation tests (43 tests)
+   - `test_neural_net_layers.py` - Custom layer tests (12 tests)
+   - `test_loaders.py` - Dataset loader/downloader tests (7 tests)
+   - `test_mappers.py` - Layer/optimizer mapper tests (3 tests)
+   - `test_tokenizers.py` - Tokenization tests (4 tests)
+   - `test_ddp.py` - Distributed training tests (16 tests)
+
+2. **Run Tests with Coverage**:
    Execute the following commands to run tests and generate a coverage report:
    ```bash
    coverage run -m pytest
    coverage report
    ```
 
-2. **Generate HTML Coverage Report** (Optional):
+3. **Generate HTML Coverage Report** (Optional):
    For a detailed coverage report in HTML format:
    ```bash
    coverage html
    ```
    Open the `htmlcov/index.html` file in a web browser to view the report.
+
+### Platform-Specific Tests
+
+Some tests require Linux-specific features (e.g., `/dev/shm` for shared memory caching) and will be automatically skipped on macOS/Windows:
+- `test_train_*` - Full training integration tests with model persistence
+- `test_cache_miss` - Shared memory cache behavior
+- `test_delete` - Model deletion with shared memory cleanup
+
+These tests will run automatically on Linux systems where `/dev/shm` is available.

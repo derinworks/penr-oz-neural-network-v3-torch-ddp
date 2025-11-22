@@ -1,4 +1,5 @@
 import math
+import os
 import os.path
 import time
 import unittest
@@ -320,6 +321,7 @@ class TestNeuralNetModel(unittest.TestCase):
          {"adamw": {"lr": 3e-4}},
          [1,2,3,4,5,6,7,8], [2,3,4,5,6,7,8,9], 3, 4),
     ])
+    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
     def test_train(self, layers: list[dict], optimizer: dict,
                    input_data: list, target: list, epochs: int, batch_size: int):
 
@@ -410,6 +412,7 @@ class TestNeuralNetModel(unittest.TestCase):
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("nonexistent_model")
 
+    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
     def test_delete(self):
         model = NeuralNetworkModel("test", Mapper([{"linear": {"in_features": 9, "out_features": 9}}],
                                                   {"sgd": {}}))
@@ -429,6 +432,56 @@ class TestNeuralNetModel(unittest.TestCase):
         # No error raised for failing to delete
         NeuralNetworkModel.delete("nonexistent")
 
+    def test_weights_property(self):
+        model = NeuralNetworkModel("test", Mapper(
+            [{"linear": {"in_features": 3, "out_features": 5}},
+             {"relu": {}},
+             {"linear": {"in_features": 5, "out_features": 2}}],
+            {"sgd": {}}))
+        
+        weights = model._weights
+        
+        # Should have 2 weight matrices (from 2 linear layers) and 2 biases (which are None in _weights)
+        self.assertEqual(len(weights), 4)
+        # First weight should be 2D (weight matrix from first linear layer)
+        self.assertIsNotNone(weights[0])
+        self.assertEqual(weights[0].ndim, 2)
+        # Second should be None (bias from first linear layer)
+        self.assertIsNone(weights[1])
+        # Third weight should be 2D (weight matrix from second linear layer)
+        self.assertIsNotNone(weights[2])
+        self.assertEqual(weights[2].ndim, 2)
+        # Fourth should be None (bias from second linear layer)
+        self.assertIsNone(weights[3])
+
+    @patch.dict(os.environ, {"RANK": "0", "LOCAL_RANK": "0"})
+    @patch('neural_net_model.torch.cuda.set_device')
+    @patch('neural_net_model.torch.cuda.is_available', return_value=True)
+    def test_to_method_with_ddp_cuda(self, mock_cuda_available, mock_set_device):
+        model = NeuralNetworkModel("test", Mapper(
+            [{"linear": {"in_features": 3, "out_features": 3}}],
+            {"sgd": {}}))
+        
+        # Mock super().to() to avoid actual CUDA call
+        with patch.object(nn.Module, 'to', return_value=None):
+            model.to("cuda")
+        
+        # Should have called set_device with cuda:0
+        mock_set_device.assert_called_once_with("cuda:0")
+
+    def test_to_method_cpu(self):
+        model = NeuralNetworkModel("test", Mapper(
+            [{"linear": {"in_features": 3, "out_features": 3}}],
+            {"sgd": {}}))
+        
+        # Should not raise any errors
+        model.to("cpu")
+        
+        # Verify device
+        device = next(model.parameters()).device
+        self.assertEqual(device.type, "cpu")
+
+    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
     def test_cache_miss(self):
         model = NeuralNetworkModel("test", Mapper([{"linear": {"in_features": 9, "out_features": 9}}],
                                                   {"sgd": {}}))
