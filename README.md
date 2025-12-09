@@ -69,6 +69,11 @@ Test the endpoints using Swagger at [http://127.0.0.1:8000/docs](http://127.0.0.
 6. **Interact with the Dashboard**
 Diagnose model training at [http://127.0.0.1:8000/dashboard](http://127.0.0.1:8000/dashboard).
 
+7. **Quickly spin up the Service in a brand-new Linux VM**
+   ```bash
+   ./run-in-vm.sh
+   ```
+
 ---
 
 ## Testing and Coverage
