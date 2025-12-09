@@ -212,7 +212,7 @@ class NeuralNetworkModel(nn.Module):
         device = next(self.parameters()).device
         log.info(f"Evaluating model using device {device}")
         # evaluate cost each epoch and take average and accumulate
-        avg_cost_tensor = torch.tensor(0.0)
+        avg_cost_tensor = 0.0
         for epoch in range(epochs):
             # load data
             if target_loader is None:
@@ -358,7 +358,7 @@ class NeuralNetworkModel(nn.Module):
             # clear gradients
             self.optimizer.zero_grad()
             # clear cost and activations
-            cost = torch.tensor(0.0)
+            cost = 0.0
             activations.clear()
             # take training steps
             for step in range(num_steps):
