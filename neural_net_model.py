@@ -183,7 +183,8 @@ class NeuralNetworkModel(nn.Module):
         return activations[-1].tolist(), cost.item() if cost.numel() > 0 else None
 
     @torch.no_grad()
-    def evaluate_model(self, dataset_id: str, target_dataset_id: str | None, shard: int, epochs: int, batch_size: int, block_size: int) -> float:
+    def evaluate_model(self, dataset_id: str, target_dataset_id: str | None, shard: int,
+                       epochs: int, batch_size: int, block_size: int, step_size: int) -> float:
         """
         Evaluate cost compared to the provided value target without training done.
         :param dataset_id: Dataset to load
@@ -192,6 +193,7 @@ class NeuralNetworkModel(nn.Module):
         :param epochs: Number of evaluation iterations.
         :param batch_size: Batch size for evaluation sample.
         :param block_size: Block size (sequence length) for single evaluation sample entry
+        :param step_size: Number of blocks (or sequences) to process per step
         :return: average cost
         """
         # evaluation is not training
@@ -199,10 +201,13 @@ class NeuralNetworkModel(nn.Module):
         self.layers.training = False
 
         # Prep evaluation data loader
-        log.info(f"Evaluation batch size: {batch_size}")
         buffer_size = batch_size * block_size
+        num_steps = max(1, buffer_size // (step_size * block_size * ddp.ddp_world_size()))
         begin_idx = buffer_size * ddp.ddp_rank()
         idx_offset = buffer_size * ddp.ddp_world_size()
+        if ddp.master_proc():
+            log.info(f"Evaluation batch size: {batch_size}, buffer size: {buffer_size}, step size: {step_size}")
+            log.info(f"Evaluation calc to be done in {num_steps} step(s) repeated {epochs} epoch(s)")
         loader = Loader(dataset_id, shard, begin_idx, buffer_size, idx_offset)
         target_loader = None
         if target_dataset_id is not None:
@@ -210,7 +215,8 @@ class NeuralNetworkModel(nn.Module):
 
         # determine device
         device = next(self.parameters()).device
-        log.info(f"Evaluating model using device {device}")
+        if ddp.master_proc():
+            log.info(f"Evaluating model using device {device}")
         # evaluate cost each epoch and take average and accumulate
         avg_cost_tensor = 0.0
         for epoch in range(epochs):
@@ -220,12 +226,14 @@ class NeuralNetworkModel(nn.Module):
             else:
                 input_array = loader.next_batch(target_offset=0)
                 target_array = target_loader.next_batch(target_offset=0)
-            input_tensor = torch.tensor(input_array, dtype=torch.long).view(batch_size, block_size).to(device)
-            target = torch.tensor(target_array, dtype=torch.long).view(batch_size, block_size).to(device)
-            # forward pass
-            _, sample_cost = self(input_tensor, target, skip_softmax=True)
-            # record sample cost
-            avg_cost_tensor += sample_cost / epochs
+            # take evaluation steps
+            for step in range(num_steps):
+                input_tensor = torch.tensor(input_array, dtype=torch.long).view(batch_size, block_size).to(device)
+                target = torch.tensor(target_array, dtype=torch.long).view(batch_size, block_size).to(device)
+                # forward pass
+                _, step_cost = self(input_tensor, target, skip_softmax=True)
+                # add average step cost per epoch to average cost
+                avg_cost_tensor += step_cost / (epochs * num_steps)
         if ddp.is_ddp():
             ddp.all_reduce(avg_cost_tensor)
         avg_cost = avg_cost_tensor.item()
@@ -276,10 +284,10 @@ class NeuralNetworkModel(nn.Module):
         return tokens
 
     @classmethod
-    def train_model_on_device(cls, model_id: str, device: str,
-                              dataset_id: str, shard: int, epochs: int, batch_size: int, block_size: int):
+    def train_model_on_device(cls, model_id: str, device: str, dataset_id: str, shard: int,
+                              epochs: int, batch_size: int, block_size: int, step_size: int):
         """
-        Load the neural network, move to device and train using the downloaded training dataset.
+        Load the neural network, move to device and train starting at the specified dataset shard.
         :param model_id: Model id
         :param device: Device to move the model to
         :param dataset_id: Dataset to load
@@ -287,6 +295,7 @@ class NeuralNetworkModel(nn.Module):
         :param epochs: Number of training iterations.
         :param batch_size: Batch size for training sample.
         :param block_size: Block size for single training batch entry (or sequence length)
+        :param step_size: Number of blocks (or sequences) to process per step
         """
         if ddp.is_ddp():
             ddp.reconfig_logging()
@@ -297,13 +306,13 @@ class NeuralNetworkModel(nn.Module):
         model.to(device)
         if ddp.master_proc():
             log.info(f"Moved model {model_id} to device {device}")
-        model.train_model(dataset_id, shard, epochs, batch_size, block_size)
+        model.train_model(dataset_id, shard, epochs, batch_size, block_size, step_size)
 
         if ddp.is_ddp():
             log.info(f"Process {ddp.ddp_local_rank()} - cleaning up")
             dist.destroy_process_group()
 
-    def train_model(self, dataset_id: str, shard: int, epochs: int, batch_size: int, block_size: int):
+    def train_model(self, dataset_id: str, shard: int, epochs: int, batch_size: int, block_size: int, step_size: int):
         """
         Train the neural network using the downloaded training dataset.
         :param dataset_id: Dataset to load
@@ -311,6 +320,7 @@ class NeuralNetworkModel(nn.Module):
         :param epochs: Number of training iterations.
         :param batch_size: Batch size for training sample.
         :param block_size: Block size for single training batch entry (or sequence length)
+        :param step_size: Number of blocks (or sequences) to process per step
         """
         # Determine device
         device = next(self.parameters()).device
@@ -319,7 +329,6 @@ class NeuralNetworkModel(nn.Module):
 
         # Prep training data loader
         buffer_size = batch_size * block_size
-        step_size = 8 if device.type == 'cuda' else 2
         num_steps = max(1, buffer_size // (step_size * block_size * ddp.ddp_world_size()))
         begin_idx = buffer_size * ddp.ddp_rank()
         idx_offset = buffer_size * ddp.ddp_world_size()
