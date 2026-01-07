@@ -155,19 +155,19 @@ class TestNeuralNetModel(unittest.TestCase):
           {"tanh": {}},
           {"linear": {"in_features": 2, "out_features": 8}},
           {"softmaxlast": {"dim": -1}}],
-         [1, 2], [2, 3], 2, 1),
+         [1, 2], [2, 3], 2, 1, 1),
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"gelu": {}},
           {"linear": {"in_features": 2, "out_features": 8}},
           {"softmaxlast": {"dim": -1}}],
-         [1, 2], [2, 3], 2, 1),
+         [1, 2], [2, 3], 2, 1, 2),
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"linear": {"in_features": 2, "out_features": 4 * 2}},
           {"gelu": {}},
           {"linear": {"in_features": 4 * 2, "out_features": 2}},
           {"linear": {"in_features": 2, "out_features": 8}},
           {"softmaxlast": {"dim": -1}}],
-         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2),
+         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2, 1),
         ([{"embedding": {"num_embeddings": 16, "embedding_dim": 2}},
           {"layernorm": {"normalized_shape": 2}},
           {"linear": {"in_features": 2, "out_features": 4 * 2}},
@@ -176,7 +176,7 @@ class TestNeuralNetModel(unittest.TestCase):
           {"layernorm": {"normalized_shape": 2}},
           {"linear": {"in_features": 2, "out_features": 16, "bias": False}},
           {"softmaxlast": {"dim": -1}}],
-         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2),
+         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2, 2),
         ([{"embedding": {"num_embeddings": 16, "embedding_dim": 2}},
           {"dropout": {"p": 0.0}},
           {"sequential": [{"layernorm": {"normalized_shape": 2}},
@@ -187,7 +187,7 @@ class TestNeuralNetModel(unittest.TestCase):
           {"layernorm": {"normalized_shape": 2}},
           {"linear": {"in_features": 2, "out_features": 16, "bias": False}},
           {"softmaxlast": {"dim": -1}}],
-         [1, 2, 3, 4], [2, 3, 4, 5], 2, 2),
+         [1, 2, 3, 4], [2, 3, 4, 5], 2, 2, 1),
         ([{"summation": [{"embedding": {"num_embeddings": 16, "embedding_dim": 2}},
                          {"position": {"num_embeddings": 4, "embedding_dim": 2}}]},
           {"dropout": {"p": 0.0}}] +
@@ -205,10 +205,10 @@ class TestNeuralNetModel(unittest.TestCase):
          [{"layernorm": {"normalized_shape": 2}},
           {"linear": {"in_features": 2, "out_features": 16, "bias": False}},
           {"softmaxlast": {"dim": -1}}],
-         [1,2,3,4,5,6,7,8], [2,3,4,5,6,7,8,9], 3, 4),
+         [1,2,3,4,5,6,7,8], [2,3,4,5,6,7,8,9], 3, 4, 2),
     ])
     def test_evaluate(self, layers: list[dict], input_data: list, target: list,
-                      epochs: int, batch_size: int):
+                      epochs: int, batch_size: int, step_size: int):
         model = NeuralNetworkModel("test", Mapper(layers, {"sgd": {}}))
 
         block_size = len(input_data) // batch_size
@@ -217,7 +217,7 @@ class TestNeuralNetModel(unittest.TestCase):
             MockLoader.return_value = mock_loader
             mock_loader.next_batch.return_value = tuple(np.array(l, dtype=np.int32) for l in [input_data, target])
             cost = model.evaluate_model("mock_ds", None, 0,
-                                        epochs, batch_size, block_size)
+                                        epochs, batch_size, block_size, step_size)
 
         self.assertIsNotNone(cost)
         self.assertFalse(model.layers.training)
@@ -264,13 +264,13 @@ class TestNeuralNetModel(unittest.TestCase):
           {"linear": {"in_features": 2, "out_features": 8}},
           {"softmaxlast": {"dim": -1}}],
          {"sgd": {"lr": .01}},
-         [1, 2], [2, 3], 2, 1),
+         [1, 2], [2, 3], 2, 1, 2),
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"gelu": {}},
           {"linear": {"in_features": 2, "out_features": 8}},
           {"softmaxlast": {"dim": -1}}],
          {"adamw": {"lr": .01}},
-         [1, 2], [2, 3], 2, 1),
+         [1, 2], [2, 3], 2, 1, 2),
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"linear": {"in_features": 2, "out_features": 4 * 2}},
           {"gelu": {}},
@@ -278,7 +278,7 @@ class TestNeuralNetModel(unittest.TestCase):
           {"linear": {"in_features": 2, "out_features": 8}},
           {"softmaxlast": {"dim": -1}}],
          {"adamw": {"lr": .01}},
-         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2),
+         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2, 2),
         ([{"embedding": {"num_embeddings": 16, "embedding_dim": 2}},
           {"layernorm": {"normalized_shape": 2}},
           {"linear": {"in_features": 2, "out_features": 4 * 2}},
@@ -288,7 +288,7 @@ class TestNeuralNetModel(unittest.TestCase):
           {"linear": {"in_features": 2, "out_features": 16, "bias": False}},
           {"softmaxlast": {"dim": -1}}],
          {"adamw": {"lr": 1e-3}},
-         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2),
+         [1, 2, 3, 4], [2, 3, 4, 5], 4, 2, 2),
         ([{"embedding": {"num_embeddings": 16, "embedding_dim": 2}},
           {"dropout": {"p": 0.0}},
           {"sequential": [{"layernorm": {"normalized_shape": 2}},
@@ -300,7 +300,7 @@ class TestNeuralNetModel(unittest.TestCase):
           {"linear": {"in_features": 2, "out_features": 16, "bias": False}},
           {"softmaxlast": {"dim": -1}}],
          {"adamw": {"lr": .008}},
-         [1, 2, 3, 4], [2, 3, 4, 5], 2, 2),
+         [1, 2, 3, 4], [2, 3, 4, 5], 2, 2, 2),
         ([{"summation": [{"embedding": {"num_embeddings": 16, "embedding_dim": 2}},
                          {"position": {"num_embeddings": 4, "embedding_dim": 2}}]},
           {"dropout": {"p": 0.0}}] +
@@ -319,11 +319,11 @@ class TestNeuralNetModel(unittest.TestCase):
           {"linear": {"in_features": 2, "out_features": 16, "bias": False}},
           {"softmaxlast": {"dim": -1}}],
          {"adamw": {"lr": 3e-4}},
-         [1,2,3,4,5,6,7,8], [2,3,4,5,6,7,8,9], 3, 4),
+         [1,2,3,4,5,6,7,8], [2,3,4,5,6,7,8,9], 3, 4, 2),
     ])
     @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
     def test_train(self, layers: list[dict], optimizer: dict,
-                   input_data: list, target: list, epochs: int, batch_size: int):
+                   input_data: list, target: list, epochs: int, batch_size: int, step_size: int):
 
         # clean up any persisted previous test model
         NeuralNetworkModel.delete("test")
@@ -346,7 +346,7 @@ class TestNeuralNetModel(unittest.TestCase):
             mock_loader = MagicMock()
             MockLoader.return_value = mock_loader
             mock_loader.next_batch.return_value = tuple(np.array(l, dtype=np.int32) for l in [input_data, target])
-            model.train_model("mock_ds", 1, epochs, batch_size, block_size)
+            model.train_model("mock_ds", 1, epochs, batch_size, block_size, step_size)
 
         # record updated
         updated_params = [p.tolist() for p in model.parameters()]

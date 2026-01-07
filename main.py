@@ -149,6 +149,11 @@ class TrainingRequest(ModelOnDeviceRequest, DatasetRequest):
         examples=[1024],
         description="The block size (or sequence length) of each single sample entry in a batch"
     )
+    step_size: int = Field(
+        ...,
+        examples=[2],
+        description="The number of blocks (or sequences) to process per training accumulation step"
+    )
 
 class EvaluateRequest(TrainingRequest):
     target_dataset_id: str | None = Field(
@@ -165,6 +170,11 @@ class EvaluateRequest(TrainingRequest):
         ...,
         examples=[2],
         description="The number of evaluation epochs"
+    )
+    step_size: int = Field(
+        ...,
+        examples=[1],
+        description="The number of blocks (or sequences) to process per evaluation accumulation step"
     )
 
 class TokenizeTextRequest(TokenizerRequest):
@@ -343,7 +353,7 @@ def evaluate_model(body: EvaluateRequest = Body(...)):
     log.info(f"Requesting evaluation of model {model_id}")
     model = NeuralNetworkModel.deserialize(model_id)
     cost = model.evaluate_model(body.dataset_id, body.target_dataset_id, body.shard,
-                                body.epochs, body.batch_size, body.block_size)
+                                body.epochs, body.batch_size, body.block_size, body.step_size)
     return {"cost": cost}
 
 @app.post("/generate/")
@@ -382,7 +392,7 @@ async def train_model(body: TrainingRequest = Body(...)):
         async with lock:
             ddp_launch_proc = mp.Process(target=ddp.launch_single_node_ddp, args=(
                 model_id, device, NeuralNetworkModel.train_model_on_device, model_id, device,
-                body.dataset_id, body.shard, body.epochs, body.batch_size, body.block_size))
+                body.dataset_id, body.shard, body.epochs, body.batch_size, body.block_size, body.step_size))
             ddp_launch_proc.start()
             log.info(f"Waiting for distributed training process for model {model_id} to complete...")
             await run_in_threadpool(ddp_launch_proc.join)

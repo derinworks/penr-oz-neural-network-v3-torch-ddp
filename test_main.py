@@ -93,6 +93,7 @@ def test_evaluate_endpoint(mock_deserialized_model, epochs, batch_size, cost):
         "epochs": epochs,
         "batch_size": batch_size,
         "block_size": 16,
+        "step_size": 1,
     }
 
     response = client.post("/evaluate/", json=payload)
@@ -114,6 +115,7 @@ def test_evaluate_endpoint_with_gzip(mock_deserialized_model):
         "epochs": 3,
         "batch_size": 3,
         "block_size": 16,
+        "step_size": 1,
     }
 
     compressed_payload = gzip.compress(json.dumps(payload).encode("utf-8"))
@@ -160,6 +162,7 @@ def test_train_endpoint(mock_create_task, mock_deserialized_model):
         "epochs": 2,
         "batch_size": 1,
         "block_size": 3,
+        "step_size": 2,
     }
 
     response = client.put("/train/", json=payload)
@@ -176,6 +179,7 @@ def test_train_endpoint_returns_409_when_already_locked(mock_deserialized_model)
         "epochs": 2,
         "batch_size": 1,
         "block_size": 3,
+        "step_size": 2,
     }
 
     lock = asyncio.Lock()
@@ -203,6 +207,7 @@ def test_train_endpoint_with_gzip(mock_create_task, mock_deserialized_model):
         "epochs": 2,
         "batch_size": 1,
         "block_size": 3,
+        "step_size": 2,
     }
 
     compressed_payload = gzip.compress(json.dumps(payload).encode("utf-8"))
