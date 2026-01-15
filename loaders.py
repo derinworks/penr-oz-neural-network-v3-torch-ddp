@@ -47,7 +47,6 @@ class Loader:
             log.info(f"Found {len(self.shards)} shard(s) for {dataset_id}")
 
         self.shard_idx = begin_shard
-        self.begin_idx = begin_idx
         self.buffer_size = buffer_size
         self.idx_offset = idx_offset
         self.token_idx = begin_idx
@@ -64,14 +63,20 @@ class Loader:
         return np.load(os.path.join(DATA_FOLDER, self.shards[self.shard_idx])).astype(np.int32)
 
     def next_batch(self, target_offset=1) -> Tuple[np.ndarray[np.int32], np.ndarray[np.int32] | None]:
-        # if token buffer is forecasted to be out of bounds
         # load tokens from selected shard
-        if len(self.tokens) < self.token_idx + self.idx_offset + target_offset:
-            if len(self.tokens) > 0: # advance to next shard (or start over)
-                self.shard_idx += 1
-                self.shard_idx %= len(self.shards)
+        if len(self.tokens) == 0:
             self.tokens = self._load()
-        # input and target shifted by 1
+        # extend token buffer up to number of shards times if forecasted to be out of bounds
+        for _ in range(len(self.shards)):
+            if len(self.tokens) < self.token_idx + self.idx_offset + target_offset:
+                # advance to next shard (or start over)
+                self.shard_idx = (self.shard_idx + 1) % len(self.shards)
+                # combine remaining tokens with next shard and reset index
+                self.tokens = np.concatenate((self.tokens[self.token_idx:], self._load()))
+                self.token_idx = 0
+            else: # enough tokens available
+                break
+        # input and target shifted by offset
         input_array = self.tokens[self.token_idx: self.token_idx + self.buffer_size]
         target_array = None
         if target_offset > 0:
