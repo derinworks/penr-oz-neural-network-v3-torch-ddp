@@ -78,27 +78,6 @@ class TestDDP(unittest.TestCase):
         config = call_args[0][0]
         self.assertEqual(config.nproc_per_node, 4)  # max(1, 8 // 2)
 
-    @patch('ddp.get_backend')
-    @patch('ddp.all_reduce')
-    def test_ddp_all_reduce_nccl(self, mock_all_reduce, mock_get_backend):
-        mock_get_backend.return_value = 'nccl'
-        tensor = torch.tensor([1.0, 2.0, 3.0])
-        
-        ddp.ddp_all_reduce(tensor)
-        
-        self.assertTrue(mock_all_reduce.called)
-
-    @patch('ddp.get_backend')
-    @patch('ddp.all_reduce')
-    def test_ddp_all_reduce_gloo(self, mock_all_reduce, mock_get_backend):
-        mock_get_backend.return_value = 'gloo'
-        tensor = torch.tensor([1.0, 2.0, 3.0])
-        
-        with patch.dict(os.environ, {"WORLD_SIZE": "2"}):
-            ddp.ddp_all_reduce(tensor)
-        
-        self.assertTrue(mock_all_reduce.called)
-
     @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data='{"version": 1}')
     @patch('logging.config.dictConfig')
     def test_reconfig_logging(self, mock_dict_config, mock_open):

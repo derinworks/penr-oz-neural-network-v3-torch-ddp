@@ -235,7 +235,7 @@ class NeuralNetworkModel(nn.Module):
                 # add average step cost per epoch to average cost
                 avg_cost_tensor += step_cost / (epochs * num_steps)
         if ddp.is_ddp():
-            ddp.all_reduce(avg_cost_tensor)
+            dist.all_reduce(avg_cost_tensor, op=dist.ReduceOp.AVG)
         avg_cost = avg_cost_tensor.item()
         if ddp.master_proc():
             log.info(f"Model {self.model_id}: For {epochs} evaluation(s)  Avg Cost: {avg_cost:.4f}")
@@ -395,7 +395,7 @@ class NeuralNetworkModel(nn.Module):
                 avg_step_cost.backward()
             if ddp.is_ddp():
                 # reduce cost to average among distributed workers
-                ddp.all_reduce(cost)
+                dist.all_reduce(cost, op=dist.ReduceOp.AVG)
             # optimize parameters
             self.optimizer.step()
             if device.type == 'cuda': # wait for cuda device to finish work for distributed work
