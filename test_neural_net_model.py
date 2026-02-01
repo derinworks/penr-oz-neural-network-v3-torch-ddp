@@ -99,7 +99,7 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertIsNone(model.avg_cost)
         self.assertEqual(0, len(model.avg_cost_history))
         self.assertIsNone(model.stats)
-        self.assertEqual("Created", model.status)
+        self.assertEqual("Created", model.status.get("code"))
 
     @parameterized.expand([
         ([{"linear": {"in_features": 9, "out_features": 9}}, {"sigmoid": {}}] * 2, [0.5] * 9, None),
@@ -366,7 +366,7 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertEqual(model.avg_cost_history[0], 1.0)
         self.assertEqual(model.avg_cost_history[-1], model.avg_cost)
         self.assertIsNotNone(model.stats)
-        self.assertEqual("Trained", model.status)
+        self.assertEqual("Trained", model.status.get("code"))
         self.assertTrue(model.layers.training)
 
         # Deserialize and check if recorded training
@@ -501,6 +501,39 @@ class TestNeuralNetModel(unittest.TestCase):
 
         self.assertIsNotNone(model)
         self.assertTrue(os.path.exists(model_in_shm_path))
+
+    def test_train_exception_handling(self):
+        # Create a tiny model
+        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
+        model = NeuralNetworkModel("test-exc", Mapper(layers, {"sgd": {}}))
+
+        # small training parameters
+        epochs = 1
+        batch_size = 1
+        block_size = 1
+        step_size = 1
+
+        # Patch Loader to raise an exception when next_batch is called
+        with patch("neural_net_model.Loader") as MockLoader, \
+             patch.object(NeuralNetworkModel, 'serialize') as mock_serialize:
+            mock_loader = MagicMock()
+            MockLoader.return_value = mock_loader
+            mock_loader.next_batch.side_effect = Exception("test error")
+
+            # Run training and expect exception to be propagated
+            with self.assertRaises(Exception) as cm:
+                model.train_model("mock_ds", 0, epochs, batch_size, block_size, step_size)
+
+            # Ensure the exception message is the one we raised
+            self.assertIn("test error", str(cm.exception))
+
+            # serialize should have been called at least twice: initial serialize and in exception handler
+            self.assertTrue(mock_serialize.called)
+            self.assertGreaterEqual(mock_serialize.call_count, 2)
+
+            # status should have been set to Error by the exception handler
+            self.assertEqual(model.status.get("code"), "Error")
+            self.assertIn("Training epoch 1 failed", model.status.get("message"))
 
 
 if __name__ == '__main__':

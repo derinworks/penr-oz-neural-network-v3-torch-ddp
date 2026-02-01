@@ -38,7 +38,11 @@ class NeuralNetworkModel(nn.Module):
         self.avg_cost = None
         self.avg_cost_history = []
         self.stats = None
-        self.status = "Created"
+        self.status = {
+            "code": "Created",
+            "dt": dt.now().isoformat(),
+            "message": "Model created but not yet trained."
+        }
 
     @property
     def _weights(self) -> list[Tensor]:
@@ -218,7 +222,7 @@ class NeuralNetworkModel(nn.Module):
         if ddp.master_proc():
             log.info(f"Evaluating model using device {device}")
         # evaluate cost each epoch and take average and accumulate
-        avg_cost_tensor = 0.0
+        avg_cost_tensor = torch.tensor(0.0).to(device)
         for epoch in range(epochs):
             # load data
             if target_loader is None:
@@ -346,7 +350,11 @@ class NeuralNetworkModel(nn.Module):
         # Reset model for training prep and save
         self.progress = []
         self.stats = None
-        self.status = "Training"
+        self.status = {
+            "code": "Training",
+            "dt": dt.now().isoformat(),
+            "message": "Model is currently being trained."
+        }
         last_serialized = None
         if ddp.master_proc():
             self.serialize()
@@ -367,32 +375,43 @@ class NeuralNetworkModel(nn.Module):
             # clear gradients
             self.optimizer.zero_grad()
             # clear cost and activations
-            cost = 0.0
+            cost = torch.tensor(0.0).to(device)
             activations.clear()
-            # take training steps
-            for step in range(num_steps):
-                # get next batch of training data for forward pass
-                input_tensor, target = (torch.tensor(arr, dtype=torch.long).view(batch_size, block_size).to(device)
-                                        for arr in loader.next_batch())
-                # calculate step cost
-                step_activations, step_cost = model(input_tensor, target, skip_softmax=True)
-                # take average of step cost
-                avg_step_cost = step_cost / num_steps
-                # add average step to cost
-                cost += avg_step_cost.detach()
+            try:
+                # take training steps
+                for step in range(num_steps):
+                    # get next batch of training data for forward pass
+                    input_tensor, target = (torch.tensor(arr, dtype=torch.long).view(batch_size, block_size).to(device)
+                                            for arr in loader.next_batch())
+                    # calculate step cost
+                    step_activations, step_cost = model(input_tensor, target, skip_softmax=True)
+                    # take average of step cost
+                    avg_step_cost = step_cost / num_steps
+                    # add average step to cost
+                    cost += avg_step_cost.detach()
+                    if ddp.master_proc():
+                        # collect activations
+                        activations.extend(step_activations)
+                        # on last epoch or for long training intervals
+                        # retain final activation gradients to collect stats
+                        if epoch + 1 == epochs or long_training:
+                            for a in step_activations:
+                                a.retain_grad()
+                    if ddp.is_ddp():
+                        # turn off sync for grad accumulation steps until last step
+                        model.require_backward_grad_sync = (step == num_steps - 1)
+                    # back propagate to populate gradients
+                    avg_step_cost.backward()
+            except Exception as exc:
                 if ddp.master_proc():
-                    # collect activations
-                    activations.extend(step_activations)
-                    # on last epoch or for long training intervals
-                    # retain final activation gradients to collect stats
-                    if epoch + 1 == epochs or long_training:
-                        for a in step_activations:
-                            a.retain_grad()
-                if ddp.is_ddp():
-                    # turn off sync for grad accumulation steps until last step
-                    model.require_backward_grad_sync = (step == num_steps - 1)
-                # back propagate to populate gradients
-                avg_step_cost.backward()
+                    log.error(f"Model {self.model_id}: Training Epoch {epoch + 1} failed: {str(exc)}")
+                    self.status = {
+                        "code": "Error",
+                        "dt": dt.now().isoformat(),
+                        "message": f"Training epoch {epoch + 1} failed: {str(exc)}"
+                    }
+                    self.serialize()
+                raise exc
             if ddp.is_ddp():
                 # reduce cost to average among distributed workers
                 dist.all_reduce(cost, op=dist.ReduceOp.AVG)
@@ -431,7 +450,11 @@ class NeuralNetworkModel(nn.Module):
 
         if ddp.master_proc():
             # Mark training finished
-            self.status = "Trained"
+            self.status = {
+                "code": "Trained",
+                "dt": dt.now().isoformat(),
+                "message": f"Model trained for {epochs} epochs."
+            }
             # Log training is done
             log.info(f"Model {self.model_id}: Done training for {epochs} epochs.")
             # Serialize model after training

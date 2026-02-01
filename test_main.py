@@ -225,7 +225,7 @@ def test_progress_endpoint(mock_deserialized_model):
     ]
     mock_deserialized_model.avg_cost = 0.123
     mock_deserialized_model.avg_cost_history = [0.1, 0.2, 0.3]
-    mock_deserialized_model.status = "Teapot ;-)"
+    mock_deserialized_model.status = {"blah": "Teapot ;-)"}
 
     response = client.get("/progress/", params={"model_id": "test"})
 
@@ -237,7 +237,7 @@ def test_progress_endpoint(mock_deserialized_model):
         ],
         "average_cost": 0.123,
         "average_cost_history": [0.1, 0.2, 0.3],
-        "status": "Teapot ;-)"
+        "status": {"blah": "Teapot ;-)"}
     }
 
 def test_stats_endpoint(mock_deserialized_model):
