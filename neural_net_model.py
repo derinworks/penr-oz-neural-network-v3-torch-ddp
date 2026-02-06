@@ -433,6 +433,12 @@ class NeuralNetworkModel(nn.Module):
             # optimize parameters (with gradient unscaling for float16)
             if scaler is not None:
                 scaler.step(self.optimizer)
+                # unscale activation gradients before update changes the scale
+                if ddp.master_proc():
+                    inv_scale = 1.0 / scaler.get_scale()
+                    for a in activations:
+                        if a.grad is not None:
+                            a.grad.mul_(inv_scale)
                 scaler.update()
             else:
                 self.optimizer.step()
@@ -463,7 +469,7 @@ class NeuralNetworkModel(nn.Module):
 
             # Serialize model while long training intervals
             if ddp.master_proc() and long_training: # pragma: no cover
-                self._record_training_overall_progress(activations, scaler)
+                self._record_training_overall_progress(activations)
                 self.serialize()
                 last_serialized = time.time()
 
@@ -477,11 +483,11 @@ class NeuralNetworkModel(nn.Module):
             # Log training is done
             log.info(f"Model {self.model_id}: Done training for {epochs} epochs.")
             # Serialize model after training
-            self._record_training_overall_progress(activations, scaler)
+            self._record_training_overall_progress(activations)
             self.serialize()
 
     @torch.no_grad()
-    def _record_training_overall_progress(self, activations, scaler=None):
+    def _record_training_overall_progress(self, activations):
         # Calculate current average progress cost
         progress_cost = [progress["cost"] for progress in self.progress]
         avg_progress_cost = sum(progress_cost) / len(self.progress)
@@ -490,12 +496,6 @@ class NeuralNetworkModel(nn.Module):
         self.avg_cost_history.append(self.avg_cost)
         if len(self.avg_cost_history) > 100: #
             self.avg_cost_history.pop(random.randint(1, 98))
-        # Unscale activation gradients inflated by GradScaler (float16 AMP)
-        if scaler is not None:
-            inv_scale = 1.0 / scaler.get_scale()
-            for a in activations:
-                if a.grad is not None:
-                    a.grad.mul_(inv_scale)
         # Update stats
         hist_f: Callable[[torch.return_types.histogram], Tuple[list, list]] = (
             lambda h: (h.bin_edges[:-1].tolist(), h.hist.tolist()))

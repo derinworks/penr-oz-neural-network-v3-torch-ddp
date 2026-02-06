@@ -694,57 +694,71 @@ class TestNeuralNetModel(unittest.TestCase):
             mock_scaler.update.assert_called_once()
 
 
-    def test_record_progress_unscales_activation_grads(self):
-        """GradScaler's scale is removed from activation gradients before stats."""
-        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
+    def test_amp_cuda_unscales_activation_grads_before_update(self):
+        """Activation gradients are unscaled using the current scale before scaler.update()."""
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"tanh": {}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
         model = NeuralNetworkModel("test-unscale", Mapper(layers, {"sgd": {"lr": .01}}))
+        input_data = [1, 2]
+        target = [2, 3]
 
-        # Simulate activations with scaled gradients
-        a = torch.randn(2, 4, requires_grad=True)
-        loss = a.sum()
-        loss.backward()
-        # Record the true unscaled gradient values
-        true_grad = a.grad.clone()
-        # Simulate GradScaler inflation by factor of 256
-        scale_factor = 256.0
-        a.grad.mul_(scale_factor)
+        mock_device = MagicMock()
+        mock_device.type = 'cuda'
+        mock_param = MagicMock()
+        mock_param.device = mock_device
 
-        # Set up a mock scaler that reports the scale factor
-        mock_scaler = MagicMock()
-        mock_scaler.get_scale.return_value = scale_factor
+        original_tensor_to = torch.Tensor.to
 
-        # Populate progress so _record_training_overall_progress can compute avg
-        model.progress = [{"cost": 1.0}]
+        def patched_tensor_to(self_tensor, *args, **kwargs):
+            if args and isinstance(args[0], MagicMock):
+                return self_tensor
+            return original_tensor_to(self_tensor, *args, **kwargs)
 
-        # Mock _weights to avoid accessing unpopulated weight gradients
-        with patch.object(type(model), '_weights', new_callable=lambda: property(lambda self: [None, None])):
-            model._record_training_overall_progress([a], mock_scaler)
+        with patch("neural_net_model.Loader") as MockLoader, \
+             patch.object(NeuralNetworkModel, 'serialize'), \
+             patch.object(NeuralNetworkModel, '_record_training_overall_progress'), \
+             patch('neural_net_model.torch.cuda.is_bf16_supported', return_value=False), \
+             patch('neural_net_model.torch.cuda.synchronize'), \
+             patch('neural_net_model.torch.amp.GradScaler') as MockScaler, \
+             patch('neural_net_model.torch.amp.autocast') as MockAutocast, \
+             patch.object(torch.Tensor, 'to', patched_tensor_to):
+            mock_loader = MagicMock()
+            MockLoader.return_value = mock_loader
+            mock_loader.next_batch.return_value = tuple(
+                np.array(l, dtype=np.int32) for l in [input_data, target])
 
-        # Activation grads should have been unscaled back to true values
-        torch.testing.assert_close(a.grad, true_grad)
-        # Stats should reflect unscaled gradient values
-        self.assertIsNotNone(model.stats)
-        grad_stats = model.stats["layers"][0]["gradient"]
-        self.assertAlmostEqual(grad_stats["mean"], true_grad.mean().item(), places=4)
-        self.assertAlmostEqual(grad_stats["std"], true_grad.std().item(), places=4)
+            mock_scaler = MagicMock()
+            MockScaler.return_value = mock_scaler
+            mock_scaled_loss = MagicMock()
+            mock_scaler.scale.return_value = mock_scaled_loss
+            mock_scaler.get_scale.return_value = 256.0
 
-    def test_record_progress_no_scaler(self):
-        """Without scaler, activation gradients are used as-is."""
-        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
-        model = NeuralNetworkModel("test-noscale", Mapper(layers, {"sgd": {"lr": .01}}))
+            mock_ctx = MagicMock()
+            MockAutocast.return_value = mock_ctx
+            mock_ctx.__enter__ = MagicMock(return_value=None)
+            mock_ctx.__exit__ = MagicMock(return_value=False)
 
-        a = torch.randn(2, 4, requires_grad=True)
-        loss = a.sum()
-        loss.backward()
-        original_grad = a.grad.clone()
+            original_next = next
+            call_count = [0]
 
-        model.progress = [{"cost": 1.0}]
+            def patched_next(iterator, *args):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return mock_param
+                return original_next(iterator, *args)
 
-        with patch.object(type(model), '_weights', new_callable=lambda: property(lambda self: [None, None])):
-            model._record_training_overall_progress([a], None)
+            with patch('neural_net_model.next', side_effect=patched_next):
+                model.train_model("mock_ds", 1, 1, 1, 2, 1)
 
-        # Gradients should remain unchanged
-        torch.testing.assert_close(a.grad, original_grad)
+            # get_scale must be called to retrieve the scale for unscaling
+            mock_scaler.get_scale.assert_called()
+            # Verify ordering: step -> get_scale -> update
+            expected_order = [call.step(model.optimizer), call.get_scale(), call.update()]
+            actual_calls = mock_scaler.method_calls
+            step_calls = [c for c in actual_calls if c[0] in ('step', 'get_scale', 'update')]
+            self.assertEqual([c[0] for c in step_calls], ['step', 'get_scale', 'update'])
 
 
 if __name__ == '__main__':
