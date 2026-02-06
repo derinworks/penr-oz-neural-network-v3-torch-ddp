@@ -3,9 +3,10 @@ import os
 import os.path
 import time
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 from parameterized import parameterized
 import numpy as np
+import torch
 import torch.nn as nn
 from neural_net_model import NeuralNetworkModel, SHM_PATH
 from mappers import Mapper
@@ -534,6 +535,167 @@ class TestNeuralNetModel(unittest.TestCase):
             # status should have been set to Error by the exception handler
             self.assertEqual(model.status.get("code"), "Error")
             self.assertIn("Training epoch 1 failed", model.status.get("message"))
+
+
+    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
+    def test_train_cpu_no_amp(self):
+        """Training on CPU does not use AMP autocast or GradScaler."""
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"tanh": {}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test-no-amp", Mapper(layers, {"sgd": {"lr": .01}}))
+        input_data = [1, 2]
+        target = [2, 3]
+
+        with patch("neural_net_model.Loader") as MockLoader, \
+             patch('neural_net_model.torch.amp.GradScaler') as mock_scaler_cls:
+            mock_loader = MagicMock()
+            MockLoader.return_value = mock_loader
+            mock_loader.next_batch.return_value = tuple(
+                np.array(l, dtype=np.int32) for l in [input_data, target])
+
+            model.train_model("mock_ds", 1, 2, 1, 2, 1)
+
+        # Verify training completed successfully on CPU
+        self.assertEqual("Trained", model.status.get("code"))
+        self.assertEqual(len(model.progress), 2)
+        # GradScaler should never be instantiated on CPU
+        mock_scaler_cls.assert_not_called()
+
+    def test_amp_dtype_selection_bfloat16(self):
+        """When CUDA supports bf16, bfloat16 is selected and GradScaler is disabled."""
+        with patch('neural_net_model.torch.cuda.is_bf16_supported', return_value=True):
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            self.assertEqual(amp_dtype, torch.bfloat16)
+            # GradScaler should be disabled for bfloat16
+            scaler_enabled = (amp_dtype == torch.float16)
+            self.assertFalse(scaler_enabled)
+
+    def test_amp_dtype_selection_float16(self):
+        """When CUDA does not support bf16, float16 is selected and GradScaler is enabled."""
+        with patch('neural_net_model.torch.cuda.is_bf16_supported', return_value=False):
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            self.assertEqual(amp_dtype, torch.float16)
+            # GradScaler should be enabled for float16
+            scaler_enabled = (amp_dtype == torch.float16)
+            self.assertTrue(scaler_enabled)
+
+    def test_amp_not_used_on_cpu_device(self):
+        """AMP is not activated when device type is cpu."""
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"tanh": {}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test-amp-off", Mapper(layers, {"sgd": {"lr": .01}}))
+        device = next(model.parameters()).device
+        use_amp = device.type == 'cuda'
+        self.assertFalse(use_amp)
+
+    def test_amp_autocast_cpu_uses_enabled_false(self):
+        """On CPU, autocast context is called with enabled=False."""
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"tanh": {}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test-amp-ac", Mapper(layers, {"sgd": {"lr": .01}}))
+        input_data = [1, 2]
+        target = [2, 3]
+
+        with patch("neural_net_model.Loader") as MockLoader, \
+             patch.object(NeuralNetworkModel, 'serialize'), \
+             patch('neural_net_model.torch.amp.autocast', wraps=torch.amp.autocast) as mock_autocast:
+            mock_loader = MagicMock()
+            MockLoader.return_value = mock_loader
+            mock_loader.next_batch.return_value = tuple(
+                np.array(l, dtype=np.int32) for l in [input_data, target])
+            model.train_model("mock_ds", 1, 1, 1, 2, 1)
+
+            # autocast should have been called with enabled=False on CPU
+            mock_autocast.assert_called()
+            for c in mock_autocast.call_args_list:
+                args, kwargs = c
+                self.assertFalse(kwargs.get('enabled', True))
+
+    @parameterized.expand([
+        (True, torch.bfloat16),
+        (False, torch.float16),
+    ])
+    def test_amp_cuda_training_path(self, bf16_supported, expected_dtype):
+        """AMP configuration is properly set up when training on CUDA device."""
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"tanh": {}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test-amp-cuda", Mapper(layers, {"sgd": {"lr": .01}}))
+        input_data = [1, 2]
+        target = [2, 3]
+
+        # Create a mock CUDA device
+        mock_device = MagicMock()
+        mock_device.type = 'cuda'
+        mock_param = MagicMock()
+        mock_param.device = mock_device
+
+        scaler_enabled = (expected_dtype == torch.float16)
+
+        # Patch Tensor.to so .to(mock_device) returns self instead of failing
+        original_tensor_to = torch.Tensor.to
+
+        def patched_tensor_to(self_tensor, *args, **kwargs):
+            if args and isinstance(args[0], MagicMock):
+                return self_tensor
+            return original_tensor_to(self_tensor, *args, **kwargs)
+
+        with patch("neural_net_model.Loader") as MockLoader, \
+             patch.object(NeuralNetworkModel, 'serialize'), \
+             patch.object(NeuralNetworkModel, '_record_training_overall_progress'), \
+             patch('neural_net_model.torch.cuda.is_bf16_supported', return_value=bf16_supported), \
+             patch('neural_net_model.torch.cuda.synchronize'), \
+             patch('neural_net_model.torch.amp.GradScaler') as MockScaler, \
+             patch('neural_net_model.torch.amp.autocast') as MockAutocast, \
+             patch.object(torch.Tensor, 'to', patched_tensor_to):
+            # Set up mock loader
+            mock_loader = MagicMock()
+            MockLoader.return_value = mock_loader
+            mock_loader.next_batch.return_value = tuple(
+                np.array(l, dtype=np.int32) for l in [input_data, target])
+
+            # Set up mock scaler
+            mock_scaler = MagicMock()
+            MockScaler.return_value = mock_scaler
+            mock_scaled_loss = MagicMock()
+            mock_scaler.scale.return_value = mock_scaled_loss
+
+            # Set up mock autocast as context manager
+            mock_ctx = MagicMock()
+            MockAutocast.return_value = mock_ctx
+            mock_ctx.__enter__ = MagicMock(return_value=None)
+            mock_ctx.__exit__ = MagicMock(return_value=False)
+
+            # Patch next() to return fake CUDA device param for device detection only
+            original_next = next
+            call_count = [0]
+
+            def patched_next(iterator, *args):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return mock_param
+                return original_next(iterator, *args)
+
+            with patch('neural_net_model.next', side_effect=patched_next):
+                model.train_model("mock_ds", 1, 1, 1, 2, 1)
+
+            # Verify GradScaler created with correct enabled flag
+            MockScaler.assert_called_once_with('cuda', enabled=scaler_enabled)
+            # Verify autocast was called with CUDA and correct dtype
+            MockAutocast.assert_called_with('cuda', dtype=expected_dtype, enabled=True)
+            # Verify scaler.scale was called for backward pass
+            mock_scaler.scale.assert_called()
+            mock_scaled_loss.backward.assert_called()
+            # Verify scaler.step and update were called
+            mock_scaler.step.assert_called_once_with(model.optimizer)
+            mock_scaler.update.assert_called_once()
 
 
 if __name__ == '__main__':

@@ -331,6 +331,16 @@ class NeuralNetworkModel(nn.Module):
         if ddp.master_proc():
             log.info(f"Training model using device {device}")
 
+        # Configure AMP autocast and gradient scaler for CUDA
+        use_amp = device.type == 'cuda'
+        amp_dtype = None
+        scaler = None
+        if use_amp:
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16))
+            if ddp.master_proc():
+                log.info(f"AMP enabled with dtype {amp_dtype}")
+
         # Prep training data loader
         buffer_size = batch_size * block_size
         num_steps = max(1, buffer_size // (step_size * block_size * ddp.ddp_world_size()))
@@ -383,10 +393,11 @@ class NeuralNetworkModel(nn.Module):
                     # get next batch of training data for forward pass
                     input_tensor, target = (torch.tensor(arr, dtype=torch.long).view(batch_size, block_size).to(device)
                                             for arr in loader.next_batch())
-                    # calculate step cost
-                    step_activations, step_cost = model(input_tensor, target, skip_softmax=True)
-                    # take average of step cost
-                    avg_step_cost = step_cost / num_steps
+                    # calculate step cost with optional AMP autocast
+                    with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=use_amp):
+                        step_activations, step_cost = model(input_tensor, target, skip_softmax=True)
+                        # take average of step cost
+                        avg_step_cost = step_cost / num_steps
                     # add average step to cost
                     cost += avg_step_cost.detach()
                     if ddp.master_proc():
@@ -400,8 +411,11 @@ class NeuralNetworkModel(nn.Module):
                     if ddp.is_ddp():
                         # turn off sync for grad accumulation steps until last step
                         model.require_backward_grad_sync = (step == num_steps - 1)
-                    # back propagate to populate gradients
-                    avg_step_cost.backward()
+                    # back propagate to populate gradients (scaled for float16)
+                    if scaler is not None:
+                        scaler.scale(avg_step_cost).backward()
+                    else:
+                        avg_step_cost.backward()
             except Exception as exc:
                 if ddp.master_proc():
                     log.error(f"Model {self.model_id}: Training Epoch {epoch + 1} failed: {str(exc)}")
@@ -415,8 +429,12 @@ class NeuralNetworkModel(nn.Module):
             if ddp.is_ddp():
                 # reduce cost to average among distributed workers
                 dist.all_reduce(cost, op=dist.ReduceOp.AVG)
-            # optimize parameters
-            self.optimizer.step()
+            # optimize parameters (with gradient unscaling for float16)
+            if scaler is not None:
+                scaler.step(self.optimizer)
+                scaler.update()
+            else:
+                self.optimizer.step()
             if device.type == 'cuda': # wait for cuda device to finish work for distributed work
                 torch.cuda.synchronize()
             if ddp.master_proc():
