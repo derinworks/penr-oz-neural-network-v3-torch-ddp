@@ -3,14 +3,15 @@ import logging
 from multiprocessing import cpu_count
 from typing import Callable
 from torch import cuda
+import torch.distributed as dist
 from torch.distributed.launcher.api import elastic_launch, LaunchConfig
 
 log = logging.getLogger(__name__)
 
-is_ddp = lambda: int(os.environ.get("RANK", -1)) != -1
-ddp_rank = lambda: int(os.environ.get("RANK", 0))
+is_ddp = lambda: dist.is_available() and dist.is_initialized()
+ddp_rank = lambda: dist.get_rank() if is_ddp() else 0
 ddp_local_rank = lambda: int(os.environ.get("LOCAL_RANK", 0))
-ddp_world_size = lambda: int(os.environ.get("WORLD_SIZE", 1))
+ddp_world_size = lambda: dist.get_world_size() if is_ddp() else 1
 master_proc = lambda: (ddp_rank() == 0)
 
 def launch_single_node_ddp(run_id: str, device: str, worker_op: Callable[..., None], *args):

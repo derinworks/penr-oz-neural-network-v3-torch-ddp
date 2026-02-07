@@ -455,18 +455,19 @@ class TestNeuralNetModel(unittest.TestCase):
         # Fourth should be None (bias from second linear layer)
         self.assertIsNone(weights[3])
 
-    @patch.dict(os.environ, {"RANK": "0", "LOCAL_RANK": "0"})
+    @patch('neural_net_model.ddp.ddp_local_rank', return_value=0)
+    @patch('neural_net_model.ddp.is_ddp', return_value=True)
     @patch('neural_net_model.torch.cuda.set_device')
     @patch('neural_net_model.torch.cuda.is_available', return_value=True)
-    def test_to_method_with_ddp_cuda(self, mock_cuda_available, mock_set_device):
+    def test_to_method_with_ddp_cuda(self, mock_cuda_available, mock_set_device, mock_is_ddp, mock_local_rank):
         model = NeuralNetworkModel("test", Mapper(
             [{"linear": {"in_features": 3, "out_features": 3}}],
             {"sgd": {}}))
-        
+
         # Mock super().to() to avoid actual CUDA call
         with patch.object(nn.Module, 'to', return_value=None):
             model.to("cuda")
-        
+
         # Should have called set_device with cuda:0
         mock_set_device.assert_called_once_with("cuda:0")
 
