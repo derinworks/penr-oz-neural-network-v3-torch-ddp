@@ -8,18 +8,12 @@ import ddp
 class TestDDP(unittest.TestCase):
 
     def test_is_ddp_false(self):
-        with patch.object(ddp.dist, 'is_available', return_value=True), \
-             patch.object(ddp.dist, 'is_initialized', return_value=False):
+        with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(ddp.is_ddp())
 
     def test_is_ddp_true(self):
-        with patch.object(ddp.dist, 'is_available', return_value=True), \
-             patch.object(ddp.dist, 'is_initialized', return_value=True):
+        with patch.dict(os.environ, {"RANK": "0"}):
             self.assertTrue(ddp.is_ddp())
-
-    def test_is_ddp_unavailable(self):
-        with patch.object(ddp.dist, 'is_available', return_value=False):
-            self.assertFalse(ddp.is_ddp())
 
     def test_ddp_rank_default(self):
         with patch.object(ddp.dist, 'is_available', return_value=True), \

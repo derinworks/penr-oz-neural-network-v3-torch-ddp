@@ -302,7 +302,7 @@ class NeuralNetworkModel(nn.Module):
         :param block_size: Block size for single training batch entry (or sequence length)
         :param step_size: Number of blocks (or sequences) to process per step
         """
-        if int(os.environ.get("RANK", -1)) != -1:
+        if ddp.is_ddp():
             ddp.reconfig_logging()
             log.info(f"DDP local rank {ddp.ddp_local_rank()} - training model {model_id} on device {device}")
             dist.init_process_group(backend='nccl' if device == 'cuda' else 'gloo')
