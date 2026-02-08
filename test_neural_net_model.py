@@ -614,10 +614,10 @@ class TestNeuralNetModel(unittest.TestCase):
             mock_autocast.assert_not_called()
 
     @parameterized.expand([
-        (True, torch.bfloat16),
-        (False, torch.float16),
+        (True, torch.bfloat16, False),
+        (False, torch.float16, True),
     ])
-    def test_amp_cuda_training_path(self, bf16_supported, expected_dtype):
+    def test_amp_cuda_training_path(self, bf16_supported, expected_dtype, expected_scaling):
         """AMP configuration is properly set up when training on CUDA device."""
         layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
                   {"tanh": {}},
@@ -632,8 +632,6 @@ class TestNeuralNetModel(unittest.TestCase):
         mock_device.type = 'cuda'
         mock_param = MagicMock()
         mock_param.device = mock_device
-
-        scaler_enabled = (expected_dtype == torch.float16)
 
         # Patch Tensor.to so .to(mock_device) returns self instead of failing
         original_tensor_to = torch.Tensor.to
@@ -684,15 +682,20 @@ class TestNeuralNetModel(unittest.TestCase):
 
             # Verify autocast was created with CUDA and correct dtype
             MockAutocast.assert_called_once_with('cuda', dtype=expected_dtype)
-            # Verify GradScaler created with correct enabled flag
-            MockScaler.assert_called_once_with('cuda', enabled=scaler_enabled)
-            # Verify scaler.scale was called for backward pass
-            mock_scaler.scale.assert_called()
-            mock_scaled_loss.backward.assert_called()
-            # Verify scaler.step and update were called
-            mock_scaler.step.assert_called_once_with(model.optimizer)
-            mock_scaler.update.assert_called_once()
-
+            if expected_scaling:
+                # Verify GradScaler created with correct enabled flag
+                MockScaler.assert_called_once_with('cuda')
+                # Verify scaler.scale was called for backward pass
+                mock_scaler.scale.assert_called()
+                mock_scaled_loss.backward.assert_called()
+                # Verify scaler.step and update were called
+                mock_scaler.step.assert_called_once_with(model.optimizer)
+                mock_scaler.update.assert_called_once()
+            else:
+                # Verify GradScaler not created
+                MockScaler.assert_not_called()
+                # Verify scaler not used
+                mock_scaler.assert_not_called()
 
     def test_amp_cuda_unscales_activation_grads_before_update(self):
         """Activation gradients are unscaled using the current scale before scaler.update()."""

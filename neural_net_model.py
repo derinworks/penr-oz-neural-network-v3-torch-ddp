@@ -334,11 +334,14 @@ class NeuralNetworkModel(nn.Module):
 
         # Configure AMP autocast and gradient scaler for CUDA
         amp_ctx = nullcontext()
-        scaler = None
+        amp_scaler = None
         if device.type == 'cuda':
-            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            if torch.cuda.is_bf16_supported():
+                amp_dtype = torch.bfloat16
+            else:
+                amp_dtype = torch.float16
+                amp_scaler = torch.amp.GradScaler('cuda')
             amp_ctx = torch.amp.autocast('cuda', dtype=amp_dtype)
-            scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16))
             if ddp.master_proc():
                 log.info(f"AMP enabled with dtype {amp_dtype}")
 
@@ -412,9 +415,9 @@ class NeuralNetworkModel(nn.Module):
                     if ddp.is_ddp():
                         # turn off sync for grad accumulation steps until last step
                         model.require_backward_grad_sync = (step == num_steps - 1)
-                    # back propagate to populate gradients (scaled for float16)
-                    if scaler is not None:
-                        scaler.scale(avg_step_cost).backward()
+                    # back propagate to populate gradients (scaled if needed)
+                    if amp_scaler is not None:
+                        amp_scaler.scale(avg_step_cost).backward()
                     else:
                         avg_step_cost.backward()
             except Exception as exc:
@@ -430,16 +433,16 @@ class NeuralNetworkModel(nn.Module):
             if ddp.is_ddp():
                 # reduce cost to average among distributed workers
                 dist.all_reduce(cost, op=dist.ReduceOp.AVG)
-            # optimize parameters (with gradient unscaling for float16)
-            if scaler is not None:
-                scaler.step(self.optimizer)
+            # optimize parameters (with gradient unscaling if needed)
+            if amp_scaler is not None:
+                amp_scaler.step(self.optimizer)
                 # unscale activation gradients before update changes the scale
                 if ddp.master_proc():
-                    inv_scale = 1.0 / scaler.get_scale()
+                    inv_scale = 1.0 / amp_scaler.get_scale()
                     for a in activations:
                         if a.grad is not None:
                             a.grad.mul_(inv_scale)
-                scaler.update()
+                amp_scaler.update()
             else:
                 self.optimizer.step()
             if device.type == 'cuda': # wait for cuda device to finish work for distributed work
