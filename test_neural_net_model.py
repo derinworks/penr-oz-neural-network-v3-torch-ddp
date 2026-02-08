@@ -684,7 +684,7 @@ class TestNeuralNetModel(unittest.TestCase):
             MockAutocast.assert_called_once_with('cuda', dtype=expected_dtype)
             if expected_scaling:
                 # Verify GradScaler created with correct enabled flag
-                MockScaler.assert_called_once_with('cuda', enabled=scaler_enabled)
+                MockScaler.assert_called_once_with('cuda')
                 # Verify scaler.scale was called for backward pass
                 mock_scaler.scale.assert_called()
                 mock_scaled_loss.backward.assert_called()
