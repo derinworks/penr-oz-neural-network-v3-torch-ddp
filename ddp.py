@@ -2,7 +2,8 @@ import os
 import logging
 from multiprocessing import cpu_count
 from typing import Callable
-from torch import cuda
+from torch import cuda, Tensor
+from torch.distributed import all_reduce, get_backend, ReduceOp
 from torch.distributed.launcher.api import elastic_launch, LaunchConfig
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,13 @@ def launch_single_node_ddp(run_id: str, device: str, worker_op: Callable[..., No
     config = LaunchConfig(min_nodes=1, max_nodes=1, nproc_per_node=nproc, rdzv_backend="c10d",
                           max_restarts=0, monitor_interval=5, run_id=run_id)
     elastic_launch(config, entrypoint=worker_op)(*args)
+
+def ddp_all_reduce(tensor: Tensor):
+    if get_backend() == 'nccl':
+        all_reduce(tensor, op=ReduceOp.AVG)
+    else:
+        all_reduce(tensor, op=ReduceOp.SUM)
+        tensor.div_(ddp_world_size())
 
 def reconfig_logging():
     import json
