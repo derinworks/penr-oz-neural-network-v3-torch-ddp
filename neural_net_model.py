@@ -1,5 +1,6 @@
 import logging
 import os
+import platform
 import multiprocessing
 import random
 import shutil
@@ -19,11 +20,31 @@ from mappers import Mapper
 
 
 log = logging.getLogger(__name__)
-SHM_PATH = "/dev/shm"
 MODELS_FOLDER = "models"
 
 
 class NeuralNetworkModel(nn.Module):
+
+    @staticmethod
+    def _detect_shm_path() -> str:
+        """Detect the best shared memory path for the current OS.
+
+        Resolution order:
+          1. ``/dev/shm`` on Linux.
+          2. ``/Volumes/RAMDisk`` on macOS (if a RAM disk is mounted there).
+          3. ``/tmp`` as a safe fallback.
+        """
+        system = platform.system()
+        if system == "Linux":
+            if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
+                return "/dev/shm"
+        elif system == "Darwin":
+            if os.path.isdir("/Volumes/RAMDisk") and os.access("/Volumes/RAMDisk", os.W_OK):
+                return "/Volumes/RAMDisk"
+        return "/tmp"
+
+    SHM_PATH = _detect_shm_path()
+
     def __init__(self, model_id: str, mapper: Mapper):
         """
         Initialize a neural network with multiple layers.
@@ -71,7 +92,7 @@ class NeuralNetworkModel(nn.Module):
 
     def serialize(self):
         os.makedirs(MODELS_FOLDER, exist_ok=True)
-        os.makedirs(os.path.join(SHM_PATH, MODELS_FOLDER), exist_ok=True)
+        os.makedirs(os.path.join(self.SHM_PATH, MODELS_FOLDER), exist_ok=True)
         model_path = self.get_model_path(self.model_id)
         model_data = {
             "layers": self.mapper.layers,
@@ -84,7 +105,7 @@ class NeuralNetworkModel(nn.Module):
             "stats": self.stats,
             "status": self.status,
         }
-        model_in_shm_path = os.path.join(SHM_PATH, model_path)
+        model_in_shm_path = os.path.join(self.SHM_PATH, model_path)
         if ddp.master_proc():
             log.info(f"Caching model to {model_in_shm_path}...")
         torch.save(model_data, model_in_shm_path)
@@ -99,7 +120,7 @@ class NeuralNetworkModel(nn.Module):
     def deserialize(cls, model_id: str):
         try:
             model_path = cls.get_model_path(model_id)
-            model_in_shm_path = os.path.join(SHM_PATH, model_path)
+            model_in_shm_path = os.path.join(cls.SHM_PATH, model_path)
             if not os.path.exists(model_in_shm_path):
                 if ddp.master_proc():
                     log.info(f"Cache miss: copying from {model_path}")
@@ -135,7 +156,7 @@ class NeuralNetworkModel(nn.Module):
     def delete(cls, model_id: str):
         try:
             model_path = cls.get_model_path(model_id)
-            model_in_shm_path = os.path.join(SHM_PATH, model_path)
+            model_in_shm_path = os.path.join(cls.SHM_PATH, model_path)
             os.remove(model_in_shm_path)
             if os.path.exists(model_path):
                 os.remove(model_path)
