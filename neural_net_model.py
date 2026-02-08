@@ -240,7 +240,8 @@ class NeuralNetworkModel(nn.Module):
                 # add average step cost per epoch to average cost
                 avg_cost_tensor += step_cost / (epochs * num_steps)
         if ddp.is_ddp():
-            dist.all_reduce(avg_cost_tensor, op=dist.ReduceOp.AVG)
+            # reduce avg cost among distributed workers
+            ddp.ddp_all_reduce(avg_cost_tensor)
         avg_cost = avg_cost_tensor.item()
         if ddp.master_proc():
             log.info(f"Model {self.model_id}: For {epochs} evaluation(s)  Avg Cost: {avg_cost:.4f}")
@@ -304,8 +305,10 @@ class NeuralNetworkModel(nn.Module):
         """
         if ddp.is_ddp():
             ddp.reconfig_logging()
-            log.info(f"DDP local rank {ddp.ddp_local_rank()} - training model {model_id} on device {device}")
-            dist.init_process_group(backend='nccl' if device == 'cuda' else 'gloo')
+            backend = 'nccl' if device == 'cuda' else 'gloo'
+            log.info(f"DDP local rank {ddp.ddp_local_rank()} - training model {model_id} on device {device} "
+                     f"with backend {backend}")
+            dist.init_process_group(backend=backend)
 
         model = cls.deserialize(model_id)
         model.to(device)
@@ -431,8 +434,8 @@ class NeuralNetworkModel(nn.Module):
                     self.serialize()
                 raise exc
             if ddp.is_ddp():
-                # reduce cost to average among distributed workers
-                dist.all_reduce(cost, op=dist.ReduceOp.AVG)
+                # reduce cost among distributed workers
+                ddp.ddp_all_reduce(cost)
             # optimize parameters (with gradient unscaling if needed)
             if amp_scaler is not None:
                 amp_scaler.step(self.optimizer)
