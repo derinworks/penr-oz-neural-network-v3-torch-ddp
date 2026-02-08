@@ -8,7 +8,7 @@ from parameterized import parameterized
 import numpy as np
 import torch
 import torch.nn as nn
-from neural_net_model import NeuralNetworkModel, SHM_PATH, _detect_shm_path
+from neural_net_model import NeuralNetworkModel
 from mappers import Mapper
 import neural_net_layers as nnl
 
@@ -322,7 +322,7 @@ class TestNeuralNetModel(unittest.TestCase):
          {"adamw": {"lr": 3e-4}},
          [1,2,3,4,5,6,7,8], [2,3,4,5,6,7,8,9], 3, 4, 2),
     ])
-    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
+    @unittest.skipUnless(os.path.exists(NeuralNetworkModel.SHM_PATH), f"Requires {NeuralNetworkModel.SHM_PATH} (shared memory)")
     def test_train(self, layers: list[dict], optimizer: dict,
                    input_data: list, target: list, epochs: int, batch_size: int, step_size: int):
 
@@ -413,13 +413,13 @@ class TestNeuralNetModel(unittest.TestCase):
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("nonexistent_model")
 
-    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
+    @unittest.skipUnless(os.path.exists(NeuralNetworkModel.SHM_PATH), f"Requires {NeuralNetworkModel.SHM_PATH} (shared memory)")
     def test_delete(self):
         model = NeuralNetworkModel("test", Mapper([{"linear": {"in_features": 9, "out_features": 9}}],
                                                   {"sgd": {}}))
         model.serialize()
         model_path = NeuralNetworkModel.get_model_path(model.model_id)
-        model_in_shm_path = os.path.join(SHM_PATH, model_path)
+        model_in_shm_path = os.path.join(NeuralNetworkModel.SHM_PATH, model_path)
 
         self.assertTrue(os.path.exists(model_in_shm_path))
         time.sleep(1) # wait a bit for cache to flush to disk
@@ -482,13 +482,13 @@ class TestNeuralNetModel(unittest.TestCase):
         device = next(model.parameters()).device
         self.assertEqual(device.type, "cpu")
 
-    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
+    @unittest.skipUnless(os.path.exists(NeuralNetworkModel.SHM_PATH), f"Requires {NeuralNetworkModel.SHM_PATH} (shared memory)")
     def test_cache_miss(self):
         model = NeuralNetworkModel("test", Mapper([{"linear": {"in_features": 9, "out_features": 9}}],
                                                   {"sgd": {}}))
         model.serialize()
         model_path = NeuralNetworkModel.get_model_path(model.model_id)
-        model_in_shm_path = os.path.join(SHM_PATH, model_path)
+        model_in_shm_path = os.path.join(NeuralNetworkModel.SHM_PATH, model_path)
 
         self.assertTrue(os.path.exists(model_in_shm_path))
         time.sleep(1) # wait a bit for cache to flush to disk
@@ -537,7 +537,7 @@ class TestNeuralNetModel(unittest.TestCase):
             self.assertIn("Training epoch 1 failed", model.status.get("message"))
 
 
-    @unittest.skipUnless(os.path.exists(SHM_PATH), f"Requires {SHM_PATH} (Linux shared memory)")
+    @unittest.skipUnless(os.path.exists(NeuralNetworkModel.SHM_PATH), f"Requires {NeuralNetworkModel.SHM_PATH} (shared memory)")
     def test_train_cpu_no_amp(self):
         """Training on CPU does not use AMP autocast or GradScaler."""
         layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
@@ -763,47 +763,27 @@ class TestNeuralNetModel(unittest.TestCase):
             step_calls = [c for c in actual_calls if c[0] in ('step', 'get_scale', 'update')]
             self.assertEqual([c[0] for c in step_calls], ['step', 'get_scale', 'update'])
 
-
-class TestDetectShmPath(unittest.TestCase):
-
-    @patch.dict(os.environ, {}, clear=True)
     @patch("neural_net_model.platform.system", return_value="Linux")
     @patch("neural_net_model.os.path.isdir", side_effect=lambda p: p == "/dev/shm")
     @patch("neural_net_model.os.access", return_value=True)
-    def test_linux_uses_dev_shm(self, mock_access, mock_isdir, mock_system):
-        self.assertEqual(_detect_shm_path(), "/dev/shm")
+    def test_detect_shm_path_linux(self, mock_access, mock_isdir, mock_system):
+        self.assertEqual(NeuralNetworkModel._detect_shm_path(), "/dev/shm")
 
-    @patch.dict(os.environ, {}, clear=True)
     @patch("neural_net_model.platform.system", return_value="Darwin")
     @patch("neural_net_model.os.path.isdir", side_effect=lambda p: p == "/Volumes/RAMDisk")
     @patch("neural_net_model.os.access", return_value=True)
-    def test_macos_prefers_ramdisk(self, mock_access, mock_isdir, mock_system):
-        self.assertEqual(_detect_shm_path(), "/Volumes/RAMDisk")
+    def test_detect_shm_path_macos_ramdisk(self, mock_access, mock_isdir, mock_system):
+        self.assertEqual(NeuralNetworkModel._detect_shm_path(), "/Volumes/RAMDisk")
 
-    @patch.dict(os.environ, {}, clear=True)
     @patch("neural_net_model.platform.system", return_value="Darwin")
     @patch("neural_net_model.os.path.isdir", return_value=False)
-    def test_macos_falls_back_to_tmp(self, mock_isdir, mock_system):
-        self.assertEqual(_detect_shm_path(), "/tmp")
+    def test_detect_shm_path_macos_fallback(self, mock_isdir, mock_system):
+        self.assertEqual(NeuralNetworkModel._detect_shm_path(), "/tmp")
 
-    @patch.dict(os.environ, {"SHM_PATH": "/custom/shm"})
-    @patch("neural_net_model.os.path.isdir", side_effect=lambda p: p == "/custom/shm")
-    @patch("neural_net_model.os.access", return_value=True)
-    def test_env_var_override(self, mock_access, mock_isdir):
-        self.assertEqual(_detect_shm_path(), "/custom/shm")
-
-    @patch.dict(os.environ, {"SHM_PATH": "/nonexistent"})
-    @patch("neural_net_model.platform.system", return_value="Linux")
-    @patch("neural_net_model.os.path.isdir", side_effect=lambda p: p in ("/dev/shm",))
-    @patch("neural_net_model.os.access", return_value=True)
-    def test_invalid_env_var_ignored(self, mock_access, mock_isdir, mock_system):
-        self.assertEqual(_detect_shm_path(), "/dev/shm")
-
-    @patch.dict(os.environ, {}, clear=True)
     @patch("neural_net_model.platform.system", return_value="Windows")
     @patch("neural_net_model.os.path.isdir", return_value=False)
-    def test_other_os_falls_back_to_tmp(self, mock_isdir, mock_system):
-        self.assertEqual(_detect_shm_path(), "/tmp")
+    def test_detect_shm_path_other_os(self, mock_isdir, mock_system):
+        self.assertEqual(NeuralNetworkModel._detect_shm_path(), "/tmp")
 
 
 if __name__ == '__main__':
