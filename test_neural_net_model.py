@@ -290,12 +290,14 @@ class TestNeuralNetModel(unittest.TestCase):
                                     block_size: int, max_new_tokens: int):
         model = NeuralNetworkModel("test", Mapper(layers, {"sgd": {}}))
 
+        torch.manual_seed(42)
         streamed_tokens = list(model.generate_tokens_stream(input_context, block_size, max_new_tokens))
+        torch.manual_seed(42)
         non_streamed_tokens = model.generate_tokens(input_context, block_size, max_new_tokens)
 
         self.assertEqual(len(streamed_tokens), max_new_tokens)
-        # Verify streamed output has the right number of tokens
-        self.assertLessEqual(len(streamed_tokens), max_new_tokens)
+        # Verify that streamed and non-streamed outputs are consistent
+        self.assertEqual(non_streamed_tokens, input_context[0] + streamed_tokens)
         # All tokens should be integers
         for token in streamed_tokens:
             self.assertIsInstance(token, int)
