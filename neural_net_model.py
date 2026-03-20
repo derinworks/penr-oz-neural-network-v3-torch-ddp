@@ -307,7 +307,7 @@ class NeuralNetworkModel(nn.Module):
     def _prepare_generation(self, input_context: list, max_new_tokens: int, temperature: float,
                             top_k: int | None):
         """Common setup for token generation.
-        :return: (device, context tensor, softmax_layer)
+        :return: (context tensor, softmax_layer)
         """
         # generating is not training
         self.eval()
