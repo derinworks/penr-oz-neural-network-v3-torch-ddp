@@ -4,7 +4,7 @@ import math
 from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.params import Query
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import multiprocessing as mp
@@ -231,6 +231,11 @@ class GenerateRequest(ModelRequest):
         examples=[None],
         description="Use Top K results"
     )
+    stream: bool = Field(
+        False,
+        examples=[False],
+        description="Enable streaming mode to progressively output tokens as they are generated"
+    )
 
 class DecodeTokensRequest(TokenizerRequest):
     tokens: list[int] = Field(
@@ -361,6 +366,13 @@ def model_generate(body: GenerateRequest = Body(...)):
     model_id = body.model_id
     log.info(f"Generating tokens using model {model_id}")
     model = NeuralNetworkModel.deserialize(model_id)
+    if body.stream:
+        log.info(f"Streaming token generation for model {model_id}")
+        def token_stream():
+            for token in model.generate_tokens_stream(body.input, body.block_size, body.max_new_tokens,
+                                                      body.temperature, body.top_k):
+                yield f"{token}\n"
+        return StreamingResponse(token_stream(), media_type="text/plain")
     generated_tokens = model.generate_tokens(body.input, body.block_size, body.max_new_tokens,
                                              body.temperature, body.top_k)
     return {"tokens": generated_tokens}

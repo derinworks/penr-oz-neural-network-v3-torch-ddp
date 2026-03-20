@@ -151,6 +151,44 @@ def test_generate_endpoint(mock_deserialized_model, input_context, block_size, m
 
     assert response.status_code == 200
 
+@pytest.mark.parametrize("input_context, block_size, max_new_tokens, tokens", [
+    ([[0]], 8, 2, [1, 2]),
+    ([[0, 1]], 4, 3, [2, 3, 4]),
+])
+def test_generate_stream_endpoint(mock_deserialized_model, input_context, block_size, max_new_tokens, tokens):
+    mock_deserialized_model.generate_tokens_stream.return_value = iter(tokens)
+
+    payload = {
+        "model_id": "test",
+        "input": input_context,
+        "block_size": block_size,
+        "max_new_tokens": max_new_tokens,
+        "stream": True,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    expected_body = "".join(f"{t}\n" for t in tokens)
+    assert response.text == expected_body
+
+def test_generate_stream_false_returns_json(mock_deserialized_model):
+    mock_deserialized_model.generate_tokens.return_value = [0, 1, 2]
+
+    payload = {
+        "model_id": "test",
+        "input": [[0]],
+        "block_size": 8,
+        "max_new_tokens": 2,
+        "stream": False,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"tokens": [0, 1, 2]}
+
 @patch("main.create_task")
 def test_train_endpoint(mock_create_task, mock_deserialized_model):
     # Prevent creating a real background task and avoid 'coroutine was never awaited' warnings
