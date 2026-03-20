@@ -261,6 +261,49 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertFalse(model.layers.training)
 
     @parameterized.expand([
+        ([{"embedding": {"num_embeddings": 18, "embedding_dim": 2}}, {"flatten": {}},
+          {"linear": {"in_features": 6, "out_features": 18}}, {"tanh": {}},
+          {"linear": {"in_features": 18, "out_features": 9}}, {"softmax": {"dim": 1}}],
+         [[0, 5, 8]], 3, 3),
+        ([{"summation": [{"embedding": {"num_embeddings": 27, "embedding_dim": 4}},
+                         {"position": {"num_embeddings": 8, "embedding_dim": 4}}]},
+          {"dropout": {"p": 0.2}}] +
+         [{"residual": [
+             {"sequential": [{"layernorm": {"normalized_shape": 4, "bias": False}},
+                             {"linear": {"in_features": 4, "out_features": 12, "bias": False}},
+                             {"attention": {"num_heads": 2, "dropout": 0.2}},
+                             {"linear": {"in_features": 4, "out_features": 4, "bias": False}},
+                             {"dropout": {"p": 0.2}}
+                             ]},
+             {"sequential": [{"layernorm": {"normalized_shape": 4, "bias": False}},
+                             {"linear": {"in_features": 4, "out_features": 16, "bias": False}},
+                             {"gelu": {}},
+                             {"linear": {"in_features": 16, "out_features": 4, "bias": False}},
+                             {"dropout": {"p": 0.2}}]}]}
+             for _ in range(2)] +
+         [{"layernorm": {"normalized_shape": 4, "bias": False}},
+          {"linear": {"in_features": 4, "out_features": 27, "bias": False}},
+          {"softmaxlast": {"dim": -1}}],
+         [[0]], 8, 10),
+    ])
+    def test_generate_tokens_stream(self, layers: list[dict], input_context: list,
+                                    block_size: int, max_new_tokens: int):
+        model = NeuralNetworkModel("test", Mapper(layers, {"sgd": {}}))
+
+        torch.manual_seed(42)
+        streamed_tokens = list(model.generate_tokens_stream(input_context, block_size, max_new_tokens))
+        torch.manual_seed(42)
+        non_streamed_tokens = model.generate_tokens(input_context, block_size, max_new_tokens)
+
+        self.assertEqual(len(streamed_tokens), max_new_tokens)
+        # Verify that streamed and non-streamed outputs are consistent
+        self.assertEqual(non_streamed_tokens, input_context[0] + streamed_tokens)
+        # All tokens should be integers
+        for token in streamed_tokens:
+            self.assertIsInstance(token, int)
+        self.assertFalse(model.layers.training)
+
+    @parameterized.expand([
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"tanh": {}},
           {"linear": {"in_features": 2, "out_features": 8}},
