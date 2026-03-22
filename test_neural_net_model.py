@@ -830,5 +830,119 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertEqual(NeuralNetworkModel._detect_shm_path(), tempfile.gettempdir())
 
 
+    def _make_hf_config(self, n_layer=1, n_embd=32, n_head=2,
+                        vocab_size=64, n_positions=16):
+        cfg = MagicMock()
+        cfg.vocab_size = vocab_size
+        cfg.n_embd = n_embd
+        cfg.n_head = n_head
+        cfg.n_layer = n_layer
+        cfg.n_positions = n_positions
+        cfg.resid_pdrop = 0.0
+        cfg.embd_pdrop  = 0.0
+        cfg.attn_pdrop  = 0.0
+        return cfg
+
+    def _make_hf_model_mock(self, hf_sd):
+        hf_model = MagicMock()
+        hf_model.state_dict.return_value = hf_sd
+        return hf_model
+
+    def _make_hf_sd(self, n_layer, n_embd, vocab_size, block_size):
+        sd = {}
+        sd["transformer.wte.weight"] = torch.zeros(vocab_size, n_embd)
+        sd["transformer.wpe.weight"] = torch.zeros(block_size, n_embd)
+        for i in range(n_layer):
+            p = f"transformer.h.{i}"
+            sd[f"{p}.ln_1.weight"] = torch.ones(n_embd)
+            sd[f"{p}.ln_1.bias"]   = torch.zeros(n_embd)
+            sd[f"{p}.attn.c_attn.weight"] = torch.zeros(n_embd, 3 * n_embd)
+            sd[f"{p}.attn.c_attn.bias"]   = torch.zeros(3 * n_embd)
+            sd[f"{p}.attn.c_proj.weight"] = torch.zeros(n_embd, n_embd)
+            sd[f"{p}.attn.c_proj.bias"]   = torch.zeros(n_embd)
+            sd[f"{p}.ln_2.weight"] = torch.ones(n_embd)
+            sd[f"{p}.ln_2.bias"]   = torch.zeros(n_embd)
+            sd[f"{p}.mlp.c_fc.weight"]   = torch.zeros(n_embd, 4 * n_embd)
+            sd[f"{p}.mlp.c_fc.bias"]     = torch.zeros(4 * n_embd)
+            sd[f"{p}.mlp.c_proj.weight"] = torch.zeros(4 * n_embd, n_embd)
+            sd[f"{p}.mlp.c_proj.bias"]   = torch.zeros(n_embd)
+        sd["transformer.ln_f.weight"] = torch.ones(n_embd)
+        sd["transformer.ln_f.bias"]   = torch.zeros(n_embd)
+        return sd
+
+    def test_mapped_keys_match_model_state_dict(self):
+        """Mapped keys must exactly match the keys expected by a fresh NeuralNetworkModel."""
+        n_layer, n_embd, n_head, vocab_size, block_size = 2, 32, 2, 64, 16
+
+        hf_sd = self._make_hf_sd(n_layer, n_embd, vocab_size, block_size)
+
+        hf_cfg = MagicMock()
+        hf_cfg.vocab_size = vocab_size
+        hf_cfg.n_embd = n_embd
+        hf_cfg.n_head = n_head
+        hf_cfg.n_layer = n_layer
+        hf_cfg.n_positions = block_size
+        hf_cfg.resid_pdrop = 0.0
+        hf_cfg.embd_pdrop  = 0.0
+        hf_cfg.attn_pdrop  = 0.0
+
+        layers_config = Mapper.from_hf_config(hf_cfg)
+        model = NeuralNetworkModel("tmp", Mapper(layers_config, {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
+
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer)
+        self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()))
+
+    @patch("neural_net_model.NeuralNetworkModel.serialize")
+    @patch("neural_net_model.AutoModelForCausalLM")
+    @patch("neural_net_model.AutoConfig")
+    def test_from_huggingface_returns_model(self, MockConfig, MockModel, mock_serialize):
+        n_layer, n_embd, vocab_size, block_size = 1, 32, 64, 16
+        hf_cfg = self._make_hf_config(n_layer=n_layer, n_embd=n_embd,
+                                       vocab_size=vocab_size, n_positions=block_size)
+        MockConfig.from_pretrained.return_value = hf_cfg
+        MockModel.from_pretrained.return_value = self._make_hf_model_mock(
+            self._make_hf_sd(n_layer, n_embd, vocab_size, block_size))
+
+        model = NeuralNetworkModel.from_huggingface("my-gpt2", "gpt2")
+
+        self.assertIsInstance(model, NeuralNetworkModel)
+        self.assertEqual(model.model_id, "my-gpt2")
+        mock_serialize.assert_called_once()
+
+    @patch("neural_net_model.NeuralNetworkModel.serialize")
+    @patch("neural_net_model.AutoModelForCausalLM")
+    @patch("neural_net_model.AutoConfig")
+    def test_from_huggingface_status_code(self, MockConfig, MockModel, mock_serialize):
+        n_layer, n_embd, vocab_size, block_size = 1, 32, 64, 16
+        hf_cfg = self._make_hf_config(n_layer=n_layer, n_embd=n_embd,
+                                       vocab_size=vocab_size, n_positions=block_size)
+        MockConfig.from_pretrained.return_value = hf_cfg
+        MockModel.from_pretrained.return_value = self._make_hf_model_mock(
+            self._make_hf_sd(n_layer, n_embd, vocab_size, block_size))
+
+        model = NeuralNetworkModel.from_huggingface("my-gpt2", "gpt2")
+
+        self.assertEqual(model.status["code"], "Imported")
+        self.assertIn("gpt2", model.status["message"])
+
+    @patch("neural_net_model.NeuralNetworkModel.serialize")
+    @patch("neural_net_model.AutoModelForCausalLM")
+    @patch("neural_net_model.AutoConfig")
+    def test_from_huggingface_passes_revision(self, MockConfig, MockModel, mock_serialize):
+        n_layer, n_embd, vocab_size, block_size = 1, 32, 64, 16
+        hf_cfg = self._make_hf_config(n_layer=n_layer, n_embd=n_embd,
+                                       vocab_size=vocab_size, n_positions=block_size)
+        MockConfig.from_pretrained.return_value = hf_cfg
+        MockModel.from_pretrained.return_value = self._make_hf_model_mock(
+            self._make_hf_sd(n_layer, n_embd, vocab_size, block_size))
+
+        NeuralNetworkModel.from_huggingface("m", "gpt2", revision="main")
+
+        MockConfig.from_pretrained.assert_called_once_with("gpt2", revision="main")
+        MockModel.from_pretrained.assert_called_once_with(
+            "gpt2", revision="main", torch_dtype=torch.float32, low_cpu_mem_usage=True
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

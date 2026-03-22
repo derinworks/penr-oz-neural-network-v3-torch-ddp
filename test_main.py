@@ -449,6 +449,70 @@ def test_decode_endpoint(mock_tokenizer_class):
     assert response.json() == {"encoding": "gpt2", "text": "Hello world"}
     mock_tokenizer.decode.assert_called_once_with([1, 2, 3, 4])
 
+@patch("main.NeuralNetworkModel.from_huggingface")
+def test_import_endpoint_success(mock_from_hf):
+    mock_model = MagicMock()
+    mock_from_hf.return_value = mock_model
+
+    payload = {
+        "hf_repo_id": "gpt2",
+        "model_id": "gpt2-imported",
+    }
+
+    response = client.post("/import/", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model_id": "gpt2-imported",
+        "status": "imported",
+        "message": "Model imported from HuggingFace (gpt2) and ready for use",
+    }
+    mock_from_hf.assert_called_once_with("gpt2-imported", "gpt2", None, "cpu")
+
+@patch("main.NeuralNetworkModel.from_huggingface")
+def test_import_endpoint_with_revision_and_device(mock_from_hf):
+    mock_from_hf.return_value = MagicMock()
+
+    payload = {
+        "hf_repo_id": "openai-community/gpt2-medium",
+        "model_id": "gpt2-medium",
+        "revision": "main",
+        "device": "cuda",
+    }
+
+    response = client.post("/import/", json=payload)
+
+    assert response.status_code == 200
+    mock_from_hf.assert_called_once_with("gpt2-medium", "openai-community/gpt2-medium", "main", "cuda")
+
+def test_import_endpoint_conflict():
+    lock = asyncio.Lock()
+    model_locks["test-import-locked"] = lock
+    asyncio.run(lock.acquire())
+
+    payload = {
+        "hf_repo_id": "gpt2",
+        "model_id": "test-import-locked",
+    }
+
+    response = client.post("/import/", json=payload)
+
+    assert response.status_code == 409
+    assert "test-import-locked" in response.json()["detail"]
+
+    del model_locks["test-import-locked"]
+
+@patch("main.NeuralNetworkModel.from_huggingface", side_effect=ValueError("bad repo"))
+def test_import_endpoint_value_error(mock_from_hf):
+    payload = {
+        "hf_repo_id": "nonexistent/repo",
+        "model_id": "bad-model",
+    }
+
+    response = client.post("/import/", json=payload)
+
+    assert response.status_code == 400
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__]))

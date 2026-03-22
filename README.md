@@ -69,6 +69,22 @@ Test the endpoints using Swagger at [http://127.0.0.1:8000/docs](http://127.0.0.
 6. **Interact with the Dashboard**
 Diagnose model training at [http://127.0.0.1:8000/dashboard](http://127.0.0.1:8000/dashboard).
 
+### Import from Hugging Face
+
+Import a pretrained GPT-2 family model directly from the Hugging Face Hub and make it immediately usable with all existing endpoints (`/generate/`, `/train/`, `/output/`, etc.):
+
+```bash
+curl -X POST "http://localhost:8000/import/" \
+  -H "Content-Type: application/json" \
+  -d '{"hf_repo_id": "gpt2", "model_id": "gpt2-imported"}'
+```
+
+Optional fields:
+- `revision` – specific HuggingFace branch / tag / commit (default: `null`)
+- `device` – PyTorch device, e.g. `"cuda"` (default: `"cpu"`)
+
+Supported architectures: GPT-2 family (`gpt2`, `gpt2-medium`, `gpt2-large`, `gpt2-xl`, `openai-community/gpt2-*`).
+
 7. **Quickly spin up the Service in a brand-new Linux VM**
    ```bash
    ./run-in-vm.sh
@@ -84,13 +100,13 @@ To ensure code quality and maintainability, follow these steps to run tests and 
    ```bash
    python -m pytest -v
    ```
-   The test suite includes 114 tests across 7 test files:
-   - `test_main.py` - API endpoint tests (29 tests)
-   - `test_neural_net_model.py` - Model implementation tests (43 tests)
+   The test suite includes 136 tests across 7 test files:
+   - `test_main.py` - API endpoint tests (36 tests)
+   - `test_neural_net_model.py` - Model implementation tests (65 tests)
    - `test_neural_net_layers.py` - Custom layer tests (12 tests)
    - `test_loaders.py` - Dataset loader/downloader tests (7 tests)
-   - `test_mappers.py` - Layer/optimizer mapper tests (3 tests)
-   - `test_tokenizers.py` - Tokenization tests (4 tests)
+   - `test_mappers.py` - Layer/optimizer mapper tests (12 tests)
+   - `test_gpt_tokenizers.py` - Tokenization tests (4 tests)
    - `test_ddp.py` - Distributed training tests (16 tests)
 
 2. **Run Tests with Coverage**:
