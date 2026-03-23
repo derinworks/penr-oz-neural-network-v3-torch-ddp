@@ -109,6 +109,8 @@ class Mapper:
         block_size = getattr(hf_config, "n_positions", None)
         if block_size is None:
             block_size = getattr(hf_config, "max_position_embeddings", None)
+        activation = getattr(hf_config, "activation_function", "gelu_new")
+        gelu_layer = {"gelu": {"approximate": "tanh"}} if activation == "gelu_new" else {"gelu": {}}
         dropout = getattr(hf_config, "resid_pdrop", 0.0)
         embd_dropout = getattr(hf_config, "embd_pdrop", 0.0)
         attn_dropout = getattr(hf_config, "attn_pdrop", 0.0)
@@ -133,7 +135,7 @@ class Mapper:
                 {"sequential": [
                     {"layernorm": {"normalized_shape": n_embd}},
                     {"linear": {"in_features": n_embd, "out_features": 4 * n_embd}},
-                    {"gelu": {}},
+                    gelu_layer,
                     {"linear": {"in_features": 4 * n_embd, "out_features": n_embd}},
                     {"dropout": {"p": dropout}},
                 ]},

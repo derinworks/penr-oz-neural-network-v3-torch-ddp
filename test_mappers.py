@@ -67,7 +67,8 @@ class TestMapper(unittest.TestCase):
 
     def _make_gpt2_config(self, n_layer=2, n_embd=64, n_head=2,
                            n_positions=32, vocab_size=128,
-                           resid_pdrop=0.1, embd_pdrop=0.1, attn_pdrop=0.1):
+                           resid_pdrop=0.1, embd_pdrop=0.1, attn_pdrop=0.1,
+                           activation_function="gelu_new"):
         cfg = MagicMock()
         cfg.vocab_size = vocab_size
         cfg.n_embd = n_embd
@@ -77,6 +78,7 @@ class TestMapper(unittest.TestCase):
         cfg.resid_pdrop = resid_pdrop
         cfg.embd_pdrop = embd_pdrop
         cfg.attn_pdrop = attn_pdrop
+        cfg.activation_function = activation_function
         return cfg
 
     def test_from_hf_config_layer_count(self):
@@ -174,6 +176,20 @@ class TestMapper(unittest.TestCase):
         self.assertIsInstance(nn_layers[0], nnl.Summation)
         # Last layer should be SoftmaxOnLast
         self.assertIsInstance(nn_layers[-1], nnl.SoftmaxOnLast)
+
+    def test_from_hf_config_gelu_new_activation(self):
+        """gelu_new activation maps to gelu with tanh approximation."""
+        cfg = self._make_gpt2_config(activation_function="gelu_new")
+        layers = Mapper.from_hf_config(cfg)
+        mlp_seq = layers[2]["residual"][1]["sequential"]
+        self.assertEqual(mlp_seq[2], {"gelu": {"approximate": "tanh"}})
+
+    def test_from_hf_config_standard_gelu_activation(self):
+        """Non-gelu_new activation maps to standard gelu (erf approximation)."""
+        cfg = self._make_gpt2_config(activation_function="gelu")
+        layers = Mapper.from_hf_config(cfg)
+        mlp_seq = layers[2]["residual"][1]["sequential"]
+        self.assertEqual(mlp_seq[2], {"gelu": {}})
 
     def test_from_hf_config_uses_hidden_size_fallback(self):
         """n_embd falls back to hidden_size when n_embd is absent."""
