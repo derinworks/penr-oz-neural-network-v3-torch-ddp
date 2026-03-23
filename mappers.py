@@ -87,6 +87,68 @@ class Mapper:
             raise ValueError(f"Unsupported layer: {layer}")
 
 
+    @classmethod
+    def from_hf_config(cls, hf_config) -> list[dict]:
+        """Build internal layers config list from a HuggingFace model config.
+
+        Supports GPT-2 family configs (and any config using the same attribute names).
+
+        :param hf_config: A HuggingFace ``PretrainedConfig`` instance.
+        :return: Layer config list compatible with ``Mapper.__init__`` ``layers`` argument.
+        """
+        vocab_size = hf_config.vocab_size
+        n_embd = getattr(hf_config, "n_embd", None)
+        if n_embd is None:
+            n_embd = getattr(hf_config, "hidden_size", None)
+        n_head = getattr(hf_config, "n_head", None)
+        if n_head is None:
+            n_head = getattr(hf_config, "num_attention_heads", None)
+        n_layer = getattr(hf_config, "n_layer", None)
+        if n_layer is None:
+            n_layer = getattr(hf_config, "num_hidden_layers", None)
+        block_size = getattr(hf_config, "n_positions", None)
+        if block_size is None:
+            block_size = getattr(hf_config, "max_position_embeddings", None)
+        activation = getattr(hf_config, "activation_function", "gelu_new")
+        gelu_layer = {"gelu": {"approximate": "tanh"}} if activation == "gelu_new" else {"gelu": {}}
+        dropout = getattr(hf_config, "resid_pdrop", 0.0)
+        embd_dropout = getattr(hf_config, "embd_pdrop", 0.0)
+        attn_dropout = getattr(hf_config, "attn_pdrop", 0.0)
+
+        layers = [
+            {"summation": [
+                {"embedding": {"num_embeddings": vocab_size, "embedding_dim": n_embd}},
+                {"position": {"num_embeddings": block_size, "embedding_dim": n_embd}},
+            ]},
+            {"dropout": {"p": embd_dropout}},
+        ]
+
+        for _ in range(n_layer):
+            layers.append({"residual": [
+                {"sequential": [
+                    {"layernorm": {"normalized_shape": n_embd}},
+                    {"linear": {"in_features": n_embd, "out_features": 3 * n_embd}},
+                    {"attention": {"num_heads": n_head, "dropout": attn_dropout}},
+                    {"linear": {"in_features": n_embd, "out_features": n_embd}},
+                    {"dropout": {"p": dropout}},
+                ]},
+                {"sequential": [
+                    {"layernorm": {"normalized_shape": n_embd}},
+                    {"linear": {"in_features": n_embd, "out_features": 4 * n_embd}},
+                    gelu_layer,
+                    {"linear": {"in_features": 4 * n_embd, "out_features": n_embd}},
+                    {"dropout": {"p": dropout}},
+                ]},
+            ]})
+
+        layers.extend([
+            {"layernorm": {"normalized_shape": n_embd}},
+            {"linear": {"in_features": n_embd, "out_features": vocab_size, "bias": False}},
+            {"softmaxlast": {"dim": -1}},
+        ])
+
+        return layers
+
     def to_layers(self) -> list[nn.Module]:
         return [self._to_layer(l) for l in self.layers]
 
@@ -98,3 +160,48 @@ class Mapper:
             return optim_func(params, **optim_args)
         else:
             raise ValueError(f"Unsupported optimizer: {self.optimizer}")
+
+    @classmethod
+    def map_hf_state_dict_to_custom(cls, hf_sd: dict, n_layer: int) -> dict:
+        """Map a GPT-2 HuggingFace state dict to the internal custom key names.
+
+        :param hf_sd: State dict from a HuggingFace GPT-2 model.
+        :param n_layer: Number of transformer blocks.
+        :return: State dict with keys matching the internal ``NeuralNetworkModel`` naming.
+        """
+        mapped = {}
+
+        # Token and position embeddings (layer 0 is a Summation of the two)
+        mapped["layers.0.0.weight"] = hf_sd["transformer.wte.weight"]
+        mapped["layers.0.1.weight"] = hf_sd["transformer.wpe.weight"]
+
+        for i in range(n_layer):
+            block_idx = 2 + i  # layers 0=emb summation, 1=dropout, 2..=residual blocks
+            hf_prefix = f"transformer.h.{i}"
+
+            # Attention sub-block (index 0 inside the ResidualConnection Sequential)
+            mapped[f"layers.{block_idx}.0.0.weight"] = hf_sd[f"{hf_prefix}.ln_1.weight"]
+            mapped[f"layers.{block_idx}.0.0.bias"]   = hf_sd[f"{hf_prefix}.ln_1.bias"]
+            mapped[f"layers.{block_idx}.0.1.weight"] = hf_sd[f"{hf_prefix}.attn.c_attn.weight"].t().contiguous()
+            mapped[f"layers.{block_idx}.0.1.bias"]   = hf_sd[f"{hf_prefix}.attn.c_attn.bias"]
+            mapped[f"layers.{block_idx}.0.3.weight"] = hf_sd[f"{hf_prefix}.attn.c_proj.weight"].t().contiguous()
+            mapped[f"layers.{block_idx}.0.3.bias"]   = hf_sd[f"{hf_prefix}.attn.c_proj.bias"]
+
+            # MLP sub-block (index 1 inside the ResidualConnection Sequential)
+            mapped[f"layers.{block_idx}.1.0.weight"] = hf_sd[f"{hf_prefix}.ln_2.weight"]
+            mapped[f"layers.{block_idx}.1.0.bias"]   = hf_sd[f"{hf_prefix}.ln_2.bias"]
+            mapped[f"layers.{block_idx}.1.1.weight"] = hf_sd[f"{hf_prefix}.mlp.c_fc.weight"].t().contiguous()
+            mapped[f"layers.{block_idx}.1.1.bias"]   = hf_sd[f"{hf_prefix}.mlp.c_fc.bias"]
+            mapped[f"layers.{block_idx}.1.3.weight"] = hf_sd[f"{hf_prefix}.mlp.c_proj.weight"].t().contiguous()
+            mapped[f"layers.{block_idx}.1.3.bias"]   = hf_sd[f"{hf_prefix}.mlp.c_proj.bias"]
+
+        # Final layer norm
+        ln_f_idx = 2 + n_layer
+        mapped[f"layers.{ln_f_idx}.weight"] = hf_sd["transformer.ln_f.weight"]
+        mapped[f"layers.{ln_f_idx}.bias"]   = hf_sd["transformer.ln_f.bias"]
+
+        # LM head – use explicit lm_head.weight when available, else fall back to tied wte weight
+        lm_head_weight = hf_sd.get("lm_head.weight", hf_sd["transformer.wte.weight"])
+        mapped[f"layers.{ln_f_idx + 1}.weight"] = lm_head_weight
+
+        return mapped

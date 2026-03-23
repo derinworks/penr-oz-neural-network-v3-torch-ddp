@@ -15,7 +15,7 @@ import gzip
 import ddp
 from mappers import Mapper
 from neural_net_model import NeuralNetworkModel
-from tokenizers import Tokenizer
+from gpt_tokenizers import Tokenizer
 from loaders import Downloader, Loader
 
 app = FastAPI(
@@ -244,6 +244,28 @@ class DecodeTokensRequest(TokenizerRequest):
         description="Previously Tiktoken encoded or generated tokens"
     )
 
+class ImportModelRequest(BaseModel):
+    hf_repo_id: str = Field(
+        ...,
+        examples=["gpt2", "openai-community/gpt2-medium"],
+        description="HuggingFace repo ID of the model to import"
+    )
+    model_id: str = Field(
+        ...,
+        examples=["gpt2-imported"],
+        description="Internal model ID to save the imported model under"
+    )
+    revision: str | None = Field(
+        None,
+        examples=[None],
+        description="Optional HuggingFace revision / branch / tag"
+    )
+    device: str = Field(
+        "cpu",
+        examples=["cpu", "cuda"],
+        description="PyTorch device to load the model on (default: cpu)"
+    )
+
 class ModelIdQuery(Query):
     description="The unique identifier for the model"
 
@@ -291,6 +313,31 @@ def create_model(body: CreateModelRequest = Body(...)):
     model = NeuralNetworkModel(model_id, Mapper(body.layers, body.optimizer))
     model.serialize()
     return {"message": f"Model {model_id} created and saved successfully"}
+
+@app.post("/import/")
+async def import_from_huggingface(body: ImportModelRequest = Body(...)):
+    model_id = body.model_id
+    log.info(f"Requesting import of HuggingFace model {body.hf_repo_id} as {model_id}")
+
+    lock = model_locks.setdefault(model_id, Lock())
+
+    if lock.locked():
+        raise HTTPException(status_code=409, detail=f"Operation already in progress for model {model_id}.")
+
+    async with lock:
+        await run_in_threadpool(
+            NeuralNetworkModel.from_huggingface,
+            model_id,
+            body.hf_repo_id,
+            body.revision,
+            body.device,
+        )
+
+    return {
+        "model_id": model_id,
+        "status": "imported",
+        "message": f"Model imported from HuggingFace ({body.hf_repo_id}) and ready for use",
+    }
 
 @app.get("/dataset/")
 def list_dataset(dataset_id: str = DatasetIdQuery(...)):

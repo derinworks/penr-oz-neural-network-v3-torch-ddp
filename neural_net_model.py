@@ -6,7 +6,7 @@ import random
 import shutil
 import tempfile
 from contextlib import nullcontext
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Optional
 import time
 from datetime import datetime as dt
 import torch
@@ -18,11 +18,11 @@ import ddp
 from neural_net_layers import SoftmaxOnLast
 from loaders import Loader
 from mappers import Mapper
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 log = logging.getLogger(__name__)
 MODELS_FOLDER = "models"
-
 
 class NeuralNetworkModel(nn.Module):
 
@@ -155,6 +155,58 @@ class NeuralNetworkModel(nn.Module):
         except FileNotFoundError as e:
             log.error(f"File not found error occurred: {str(e)}")
             raise KeyError(f"Model {model_id} not created yet.")
+
+    @classmethod
+    def from_huggingface(
+        cls,
+        model_id: str,
+        hf_repo_id: str,
+        revision: Optional[str] = None,
+        device: str = "cpu",
+    ) -> "NeuralNetworkModel":
+        """Import a HuggingFace GPT-2 family model into the internal format.
+
+        Downloads config and weights from HuggingFace Hub, builds a fresh
+        ``NeuralNetworkModel`` with matching architecture, maps the weights,
+        serializes to disk/SHM, and returns the ready-to-use model.
+
+        :param model_id: Internal model id used for serialization.
+        :param hf_repo_id: HuggingFace repo id, e.g. ``"gpt2"`` or
+            ``"openai-community/gpt2-medium"``.
+        :param revision: Optional HuggingFace revision / branch / tag.
+        :param device: PyTorch device string (default ``"cpu"``).
+        :return: Loaded ``NeuralNetworkModel`` instance.
+        """
+        log.info(f"Fetching HuggingFace config for {hf_repo_id} (revision={revision})")
+        hf_config = AutoConfig.from_pretrained(hf_repo_id, revision=revision)
+        n_layer = getattr(hf_config, "n_layer", None) or getattr(hf_config, "num_hidden_layers", None)
+
+        layers_config = Mapper.from_hf_config(hf_config)
+        optim_config = {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}}
+        mapper = Mapper(layers_config, optim_config)
+
+        model = cls(model_id, mapper)
+        model.to(device)
+
+        log.info(f"Downloading HuggingFace model weights for {hf_repo_id}")
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            hf_repo_id,
+            revision=revision,
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=True,
+        )
+
+        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_model.state_dict(), n_layer)
+        model.load_state_dict(mapped_sd, strict=True)
+        log.info(f"Loaded HuggingFace weights into model {model_id}")
+
+        model.status = {
+            "code": "Imported",
+            "dt": dt.now().isoformat(),
+            "message": f"Model imported from HuggingFace: {hf_repo_id}",
+        }
+        model.serialize()
+        return model
 
     @classmethod
     def delete(cls, model_id: str):

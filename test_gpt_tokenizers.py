@@ -1,5 +1,5 @@
 import unittest
-from tokenizers import Tokenizer
+from gpt_tokenizers import Tokenizer
 
 
 class TestTokenizer(unittest.TestCase):

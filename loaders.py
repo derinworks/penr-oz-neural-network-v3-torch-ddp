@@ -6,7 +6,7 @@ from typing import Tuple
 import numpy as np
 from datasets import load_dataset
 from ddp import master_proc
-from tokenizers import Tokenizer
+from gpt_tokenizers import Tokenizer
 
 log = logging.getLogger(__name__)
 DATA_FOLDER = "data"
