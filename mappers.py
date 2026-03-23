@@ -44,15 +44,6 @@ class Mapper:
         "sgd": optim.SGD,
     }
 
-    # Keys in GPT-2 HuggingFace state dicts use Conv1D with weight shape (in, out),
-    # the opposite of nn.Linear (out, in), so these need to be transposed.
-    _HF_GPT2_TRANSPOSED_SUFFIXES = (
-        "attn.c_attn.weight",
-        "attn.c_proj.weight",
-        "mlp.c_fc.weight",
-        "mlp.c_proj.weight",
-    )
-
     def __init__(self, layers: list[dict], optimizer: dict):
         self.layers = layers
         self.optimizer = optimizer
@@ -106,10 +97,18 @@ class Mapper:
         :return: Layer config list compatible with ``Mapper.__init__`` ``layers`` argument.
         """
         vocab_size = hf_config.vocab_size
-        n_embd = getattr(hf_config, "n_embd", None) or getattr(hf_config, "hidden_size", None)
-        n_head = getattr(hf_config, "n_head", None) or getattr(hf_config, "num_attention_heads", None)
-        n_layer = getattr(hf_config, "n_layer", None) or getattr(hf_config, "num_hidden_layers", None)
-        block_size = getattr(hf_config, "n_positions", None) or getattr(hf_config, "max_position_embeddings", None)
+        n_embd = getattr(hf_config, "n_embd", None)
+        if n_embd is None:
+            n_embd = getattr(hf_config, "hidden_size", None)
+        n_head = getattr(hf_config, "n_head", None)
+        if n_head is None:
+            n_head = getattr(hf_config, "num_attention_heads", None)
+        n_layer = getattr(hf_config, "n_layer", None)
+        if n_layer is None:
+            n_layer = getattr(hf_config, "num_hidden_layers", None)
+        block_size = getattr(hf_config, "n_positions", None)
+        if block_size is None:
+            block_size = getattr(hf_config, "max_position_embeddings", None)
         dropout = getattr(hf_config, "resid_pdrop", 0.0)
         embd_dropout = getattr(hf_config, "embd_pdrop", 0.0)
         attn_dropout = getattr(hf_config, "attn_pdrop", 0.0)

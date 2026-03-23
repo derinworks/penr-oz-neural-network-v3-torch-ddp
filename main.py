@@ -319,9 +319,7 @@ async def import_from_huggingface(body: ImportModelRequest = Body(...)):
     model_id = body.model_id
     log.info(f"Requesting import of HuggingFace model {body.hf_repo_id} as {model_id}")
 
-    if model_id not in model_locks:
-        model_locks[model_id] = Lock()
-    lock = model_locks[model_id]
+    lock = model_locks.setdefault(model_id, Lock())
 
     if lock.locked():
         raise HTTPException(status_code=409, detail=f"Operation already in progress for model {model_id}.")
