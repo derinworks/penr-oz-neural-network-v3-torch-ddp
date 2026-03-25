@@ -53,17 +53,22 @@ class TestDDP(unittest.TestCase):
 
     @patch('ddp.cuda.device_count')
     @patch('ddp.elastic_launch')
-    def test_launch_single_node_ddp_cuda(self, mock_elastic_launch, mock_device_count):
+    @patch('ddp.running_on_linux', return_value=False)
+    def test_launch_single_node_ddp_cuda(self, mock_running_on_linux, mock_elastic_launch, mock_device_count):
         mock_device_count.return_value = 2
         mock_worker = MagicMock()
-        
-        ddp.launch_single_node_ddp("test_run", "cuda", mock_worker, "arg1", "arg2")
-        
-        self.assertTrue(mock_elastic_launch.called)
-        call_args = mock_elastic_launch.call_args
-        config = call_args[0][0]
-        self.assertEqual(config.nproc_per_node, 2)
-        self.assertEqual(config.run_id, "test_run")
+
+        with patch.dict(os.environ, {}, clear=True):
+            ddp.launch_single_node_ddp("test_run", "cuda", mock_worker, "arg1", "arg2")
+
+            self.assertTrue(mock_elastic_launch.called)
+            call_args = mock_elastic_launch.call_args
+            config = call_args[0][0]
+            self.assertEqual(config.nproc_per_node, 2)
+            self.assertEqual(config.run_id, "test_run")
+            self.assertEqual(config.rdzv_endpoint, "127.0.0.1:0")
+            self.assertEqual(os.environ.get("MASTER_ADDR"), "127.0.0.1")
+            self.assertEqual(os.environ.get("PENR_MODEL_ID"), "test_run")
 
     @patch('ddp.cpu_count')
     @patch('ddp.elastic_launch')
@@ -102,10 +107,26 @@ class TestDDP(unittest.TestCase):
     @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data='{"version": 1}')
     @patch('logging.config.dictConfig')
     def test_reconfig_logging(self, mock_dict_config, mock_open):
-        ddp.reconfig_logging()
+        with patch.dict(os.environ, {}, clear=True):
+            ddp.reconfig_logging()
         
         self.assertTrue(mock_open.called)
         self.assertTrue(mock_dict_config.called)
+
+    @patch('ddp.Path.mkdir')
+    @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data='{"version": 1, "handlers": {}, "root": {"handlers": []}}')
+    @patch('logging.config.dictConfig')
+    @patch('ddp.running_on_linux', return_value=False)
+    def test_reconfig_logging_ddp_adds_rank_file_handler(self, mock_running_on_linux, mock_dict_config, mock_open, mock_mkdir):
+        with patch.dict(os.environ, {"RANK": "1", "TORCHELASTIC_RUN_ID": "myrun"}, clear=True):
+            ddp.reconfig_logging()
+
+        self.assertTrue(mock_open.called)
+        self.assertTrue(mock_mkdir.called)
+        cfg = mock_dict_config.call_args[0][0]
+        self.assertIn("ddp_file", cfg["handlers"])
+        self.assertEqual(cfg["handlers"]["ddp_file"]["filename"], "logs/myrun_rank01.log")
+        self.assertIn("ddp_file", cfg["root"]["handlers"])
 
 
 if __name__ == '__main__':
