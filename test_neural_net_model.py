@@ -944,5 +944,13 @@ class TestNeuralNetModel(unittest.TestCase):
         )
 
 
+    @patch('ddp.is_ddp', return_value=True)
+    def test_train_model_on_device_mps_raises(self, mock_is_ddp):
+        with self.assertRaises(NotImplementedError) as ctx:
+            NeuralNetworkModel.train_model_on_device(
+                "test_model", "mps", "test_dataset", 0, 1, 1, 1, 1)
+        self.assertIn("DDP is not supported on MPS device", str(ctx.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

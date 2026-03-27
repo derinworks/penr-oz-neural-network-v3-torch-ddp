@@ -428,6 +428,12 @@ class NeuralNetworkModel(nn.Module):
         :param step_size: Number of blocks (or sequences) to process per step
         """
         if ddp.is_ddp():
+            if device == 'mps':
+                raise NotImplementedError(
+                    "DDP is not supported on MPS device. "
+                    "PyTorch lacks collective operations (e.g. allgather_) on MPS. "
+                    "Use device 'cpu' or 'cuda' for distributed training."
+                )
             ddp.reconfig_logging()
             backend = 'nccl' if device == 'cuda' else 'gloo'
             log.info(f"DDP local rank {ddp.ddp_local_rank()} - training model {model_id} on device {device} "

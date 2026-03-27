@@ -105,6 +105,12 @@ class TestDDP(unittest.TestCase):
         config = call_args[0][0]
         self.assertEqual(config.nproc_per_node, 4)  # max(1, 8 // 2)
 
+    def test_launch_single_node_ddp_mps_raises(self):
+        mock_worker = MagicMock()
+        with self.assertRaises(NotImplementedError) as ctx:
+            ddp.launch_single_node_ddp("test_run", "mps", mock_worker, "arg1")
+        self.assertIn("DDP is not supported on MPS device", str(ctx.exception))
+
     @patch('ddp.get_backend')
     @patch('ddp.all_reduce')
     def test_ddp_all_reduce_nccl(self, mock_all_reduce, mock_get_backend):
