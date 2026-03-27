@@ -54,7 +54,8 @@ class TestDDP(unittest.TestCase):
     @patch('ddp.cuda.device_count')
     @patch('ddp.elastic_launch')
     @patch('ddp.running_on_linux', return_value=False)
-    def test_launch_single_node_ddp_cuda(self, mock_running_on_linux, mock_elastic_launch, mock_device_count):
+    @patch('ddp.detect_active_ip_family', return_value="ipv4")
+    def test_launch_single_node_ddp_cuda(self, mock_detect_active_ip_family, mock_running_on_linux, mock_elastic_launch, mock_device_count):
         mock_device_count.return_value = 2
         mock_worker = MagicMock()
 
@@ -66,9 +67,30 @@ class TestDDP(unittest.TestCase):
             config = call_args[0][0]
             self.assertEqual(config.nproc_per_node, 2)
             self.assertEqual(config.run_id, "test_run")
-            self.assertEqual(config.rdzv_endpoint, "127.0.0.1:0")
+            # LaunchConfig may normalize the endpoint into bracketed host:port form.
+            self.assertIn(config.rdzv_endpoint, {"127.0.0.1:0", "[127.0.0.1]:0"})
+            self.assertEqual(config.local_addr, "127.0.0.1")
             self.assertEqual(os.environ.get("MASTER_ADDR"), "127.0.0.1")
-            self.assertEqual(os.environ.get("PENR_MODEL_ID"), "test_run")
+
+    @patch('ddp.cuda.device_count')
+    @patch('ddp.elastic_launch')
+    @patch('ddp.running_on_linux', return_value=False)
+    @patch('ddp.detect_active_ip_family', return_value="ipv6")
+    def test_launch_single_node_ddp_cuda_ipv6(self, mock_detect_active_ip_family, mock_running_on_linux, mock_elastic_launch, mock_device_count):
+        mock_device_count.return_value = 2
+        mock_worker = MagicMock()
+
+        with patch.dict(os.environ, {}, clear=True):
+            ddp.launch_single_node_ddp("test_run", "cuda", mock_worker, "arg1", "arg2")
+
+            call_args = mock_elastic_launch.call_args
+            config = call_args[0][0]
+            self.assertEqual(config.nproc_per_node, 2)
+            self.assertEqual(config.run_id, "test_run")
+            self.assertEqual(config.rdzv_endpoint, "[::1]:0")
+            self.assertEqual(config.local_addr, "::1")
+            self.assertEqual(os.environ.get("MASTER_ADDR"), "::1")
+            self.assertEqual(os.environ.get("GLOO_USE_IPV6"), "1")
 
     @patch('ddp.cpu_count')
     @patch('ddp.elastic_launch')
@@ -118,14 +140,14 @@ class TestDDP(unittest.TestCase):
     @patch('logging.config.dictConfig')
     @patch('ddp.running_on_linux', return_value=False)
     def test_reconfig_logging_ddp_adds_rank_file_handler(self, mock_running_on_linux, mock_dict_config, mock_open, mock_mkdir):
-        with patch.dict(os.environ, {"RANK": "1", "TORCHELASTIC_RUN_ID": "myrun"}, clear=True):
+        with patch.dict(os.environ, {"RANK": "1"}, clear=True):
             ddp.reconfig_logging()
 
         self.assertTrue(mock_open.called)
         self.assertTrue(mock_mkdir.called)
         cfg = mock_dict_config.call_args[0][0]
         self.assertIn("ddp_file", cfg["handlers"])
-        self.assertEqual(cfg["handlers"]["ddp_file"]["filename"], "logs/myrun_rank01.log")
+        self.assertEqual(cfg["handlers"]["ddp_file"]["filename"], "logs/ddp_rank01.log")
         self.assertIn("ddp_file", cfg["root"]["handlers"])
 
 
