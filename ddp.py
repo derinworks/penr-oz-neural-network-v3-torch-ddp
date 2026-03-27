@@ -79,6 +79,7 @@ def reconfig_logging():
     # On non-Linux platforms, ensure worker logs are not lost due to unsupported
     # output redirection in torch.distributed.elastic.
     if is_ddp() and not running_on_linux():
+        logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLevel(logging.ERROR)
         rank = ddp_rank()
         log_dir = Path("logs")
         log_dir.mkdir(parents=True, exist_ok=True)
