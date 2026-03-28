@@ -105,10 +105,10 @@ class TestDDP(unittest.TestCase):
         config = call_args[0][0]
         self.assertEqual(config.nproc_per_node, 4)  # max(1, 8 // 2)
 
-    @patch('ddp.cpu_count')
+    @patch('ddp.mps.device_count')
     @patch('ddp.elastic_launch')
-    def test_launch_single_node_ddp_mps(self, mock_elastic_launch, mock_cpu_count):
-        mock_cpu_count.return_value = 8
+    def test_launch_single_node_ddp_mps(self, mock_elastic_launch, mock_device_count):
+        mock_device_count.return_value = 1
         mock_worker = MagicMock()
 
         with patch.dict(os.environ, {}, clear=True):
@@ -117,7 +117,7 @@ class TestDDP(unittest.TestCase):
             self.assertTrue(mock_elastic_launch.called)
             call_args = mock_elastic_launch.call_args
             config = call_args[0][0]
-            self.assertEqual(config.nproc_per_node, 4)  # max(1, 8 // 2)
+            self.assertEqual(config.nproc_per_node, 1)
             self.assertEqual(os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK"), "1")
 
     @patch('ddp.get_backend')
