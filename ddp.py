@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from multiprocessing import cpu_count
 from typing import Callable
-from torch import cuda, Tensor
+from torch import cuda, mps, Tensor
 from torch.distributed import all_reduce, get_backend, ReduceOp
 from torch.distributed.launcher.api import elastic_launch, LaunchConfig
 
@@ -36,7 +36,16 @@ def detect_active_ip_family() -> str:
     return ip_family
 
 def launch_single_node_ddp(run_id: str, device: str, worker_op: Callable[..., None], *args):
-    nproc = cuda.device_count() if device == 'cuda' else  max(1, cpu_count() // 2)
+    if device == 'mps':
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        log.warning("MPS device detected: enabled PYTORCH_ENABLE_MPS_FALLBACK=1 "
+                     "so unsupported ops (e.g. c10d::allgather_) fall back to CPU.")
+    if device == 'cuda':
+        nproc = cuda.device_count()
+    elif device == 'mps':
+        nproc = mps.device_count()
+    else:
+        nproc = max(1, cpu_count() // 2)
     log.info(f"Launching single node DDP run {run_id} with {nproc} processes on device {device}")
     launch_kwargs = dict(
         min_nodes=1,

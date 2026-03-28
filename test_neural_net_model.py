@@ -944,5 +944,23 @@ class TestNeuralNetModel(unittest.TestCase):
         )
 
 
+    @patch('neural_net_model.dist.destroy_process_group')
+    @patch('neural_net_model.dist.init_process_group')
+    @patch('ddp.reconfig_logging')
+    @patch('ddp.is_ddp', return_value=True)
+    @patch('ddp.master_proc', return_value=True)
+    def test_train_model_on_device_mps_uses_gloo(self, mock_master, mock_is_ddp,
+                                                  mock_reconfig, mock_init_pg,
+                                                  mock_destroy_pg):
+        with patch.object(NeuralNetworkModel, 'deserialize') as mock_deser, \
+             patch.object(NeuralNetworkModel, 'train_model') as mock_train:
+            mock_model = MagicMock(spec=NeuralNetworkModel)
+            mock_deser.return_value = mock_model
+            NeuralNetworkModel.train_model_on_device(
+                "test_model", "mps", "test_dataset", 0, 1, 1, 1, 1)
+            mock_init_pg.assert_called_once_with(backend='gloo')
+            mock_model.to.assert_called_once_with('mps')
+
+
 if __name__ == '__main__':
     unittest.main()

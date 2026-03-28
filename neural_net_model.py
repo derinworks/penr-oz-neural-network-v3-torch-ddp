@@ -574,6 +574,8 @@ class NeuralNetworkModel(nn.Module):
                 self.optimizer.step()
             if device.type == 'cuda': # wait for cuda device to finish work for distributed work
                 torch.cuda.synchronize()
+            elif device.type == 'mps':
+                torch.mps.synchronize()
             if ddp.master_proc():
                 # Calculate training time and speed
                 epoch_secs = time.time() - epoch_begin_time
