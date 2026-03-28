@@ -105,11 +105,20 @@ class TestDDP(unittest.TestCase):
         config = call_args[0][0]
         self.assertEqual(config.nproc_per_node, 4)  # max(1, 8 // 2)
 
-    def test_launch_single_node_ddp_mps_raises(self):
+    @patch('ddp.cpu_count')
+    @patch('ddp.elastic_launch')
+    def test_launch_single_node_ddp_mps(self, mock_elastic_launch, mock_cpu_count):
+        mock_cpu_count.return_value = 8
         mock_worker = MagicMock()
-        with self.assertRaises(NotImplementedError) as ctx:
+
+        with patch.dict(os.environ, {}, clear=True):
             ddp.launch_single_node_ddp("test_run", "mps", mock_worker, "arg1")
-        self.assertIn("DDP is not supported on MPS device", str(ctx.exception))
+
+            self.assertTrue(mock_elastic_launch.called)
+            call_args = mock_elastic_launch.call_args
+            config = call_args[0][0]
+            self.assertEqual(config.nproc_per_node, 4)  # max(1, 8 // 2)
+            self.assertEqual(os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK"), "1")
 
     @patch('ddp.get_backend')
     @patch('ddp.all_reduce')

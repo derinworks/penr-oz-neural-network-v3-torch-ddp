@@ -37,11 +37,9 @@ def detect_active_ip_family() -> str:
 
 def launch_single_node_ddp(run_id: str, device: str, worker_op: Callable[..., None], *args):
     if device == 'mps':
-        raise NotImplementedError(
-            "DDP is not supported on MPS device. "
-            "PyTorch lacks collective operations (e.g. allgather_) on MPS. "
-            "Use device 'cpu' or 'cuda' for distributed training."
-        )
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        log.warning("MPS device detected: enabled PYTORCH_ENABLE_MPS_FALLBACK=1 "
+                     "so unsupported ops (e.g. c10d::allgather_) fall back to CPU.")
     nproc = cuda.device_count() if device == 'cuda' else  max(1, cpu_count() // 2)
     log.info(f"Launching single node DDP run {run_id} with {nproc} processes on device {device}")
     launch_kwargs = dict(
