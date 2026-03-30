@@ -548,9 +548,10 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertTrue(os.path.exists(model_in_shm_path))
 
     @patch('ddp.is_ddp', return_value=True)
+    @patch('ddp.ddp_world_size', return_value=2)
     @patch('ddp.master_proc', return_value=True)
-    def test_train_model_raises_on_mixed_devices(self, mock_master, mock_is_ddp):
-        """DDP wrapping must fail when model parameters span multiple devices."""
+    def test_train_model_raises_on_mixed_devices(self, mock_master, mock_ws, mock_is_ddp):
+        """DDP wrapping must fail when model parameters span multiple devices (multi-process DDP)."""
         layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
         model = NeuralNetworkModel("test-mixed", Mapper(layers, {"sgd": {}}))
 
@@ -978,8 +979,31 @@ class TestNeuralNetModel(unittest.TestCase):
             NeuralNetworkModel.train_model_on_device(
                 "test_model", "mps", "test_dataset", 0, 1, 1, 1, 1)
             mock_init_pg.assert_called_once_with(backend='gloo')
-            # MPS falls back to CPU under DDP (gloo doesn't support MPS tensors)
-            mock_model.to.assert_called_once_with('cpu')
+            # MPS stays on MPS — device is never changed, training runs on MPS
+            mock_model.to.assert_called_once_with('mps')
+
+    @patch('ddp.is_ddp', return_value=True)
+    @patch('ddp.master_proc', return_value=True)
+    @patch('ddp.ddp_world_size', return_value=1)
+    def test_train_model_skips_ddp_wrap_for_single_process(self, mock_ws, mock_master, mock_is_ddp):
+        """For world_size=1 (e.g. MPS), DDP wrapping is skipped to avoid gloo MPS errors."""
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"tanh": {}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test-mps-skip", Mapper(layers, {"sgd": {"lr": .01}}))
+
+        import numpy as np
+        with patch("neural_net_model.Loader") as MockLoader, \
+             patch.object(NeuralNetworkModel, 'serialize'), \
+             patch('neural_net_model.nn.parallel.DistributedDataParallel') as mock_ddp:
+            mock_loader = MagicMock()
+            MockLoader.return_value = mock_loader
+            mock_loader.next_batch.return_value = tuple(
+                np.array(l, dtype=np.int32) for l in [[1, 2], [2, 3]])
+            model.train_model("mock_ds", 1, 1, 1, 2, 1)
+            # DDP should NOT be used for world_size=1 (avoids gloo+MPS error)
+            mock_ddp.assert_not_called()
 
 
 if __name__ == '__main__':

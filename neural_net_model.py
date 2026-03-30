@@ -435,10 +435,9 @@ class NeuralNetworkModel(nn.Module):
             dist.init_process_group(backend=backend)
 
         model = cls.deserialize(model_id)
-        effective = ddp.effective_device(device) if ddp.is_ddp() else device
-        model.to(effective)
+        model.to(device)
         if ddp.master_proc():
-            log.info(f"Moved model {model_id} to device {effective}")
+            log.info(f"Moved model {model_id} to device {device}")
         model.train_model(dataset_id, shard, epochs, batch_size, block_size, step_size)
 
         if ddp.is_ddp():
@@ -502,7 +501,13 @@ class NeuralNetworkModel(nn.Module):
             self.serialize()
             last_serialized = time.time()
         activations: list[Tensor] = []
-        if ddp.is_ddp():
+        # MPS always has world_size=1 since Apple Silicon exposes a single MPS device.
+        # Gloo (the only backend available for MPS) does not support MPS tensors, so
+        # wrapping with DDP for a single-process group would cause a device-type error
+        # in allgather/allreduce without any benefit (no actual synchronization needed).
+        # Skip DDP wrapping for single-process groups so MPS training works as intended.
+        use_ddp = ddp.is_ddp() and ddp.ddp_world_size() > 1
+        if use_ddp:
             # Validate all parameters reside on the same device before DDP wrapping
             param_devices = {p.device for p in self.parameters()}
             if len(param_devices) > 1:
@@ -510,7 +515,7 @@ class NeuralNetworkModel(nn.Module):
                     f"Cannot wrap model with DDP: parameters span multiple devices "
                     f"{param_devices}. Move all parameters to a single device first."
                 )
-        model = nn.parallel.DistributedDataParallel(self) if ddp.is_ddp() else self
+        model = nn.parallel.DistributedDataParallel(self) if use_ddp else self
         model.train()
         self.layers.training = True
 
@@ -548,7 +553,7 @@ class NeuralNetworkModel(nn.Module):
                         if epoch + 1 == epochs or long_training:
                             for a in step_activations:
                                 a.retain_grad()
-                    if ddp.is_ddp():
+                    if use_ddp:
                         # turn off sync for grad accumulation steps until last step
                         model.require_backward_grad_sync = (step == num_steps - 1)
                     # back propagate to populate gradients (scaled if needed)
