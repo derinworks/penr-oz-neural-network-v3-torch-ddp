@@ -972,7 +972,6 @@ class TestNeuralNetModel(unittest.TestCase):
                   {"softmaxlast": {"dim": -1}}]
         model = NeuralNetworkModel("test-mps-skip", Mapper(layers, {"sgd": {"lr": .01}}))
 
-        import numpy as np
         with patch("neural_net_model.Loader") as MockLoader, \
              patch.object(NeuralNetworkModel, 'serialize'), \
              patch('neural_net_model.nn.parallel.DistributedDataParallel') as mock_ddp:
