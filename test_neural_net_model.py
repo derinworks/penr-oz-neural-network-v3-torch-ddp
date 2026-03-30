@@ -547,6 +547,25 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertIsNotNone(model)
         self.assertTrue(os.path.exists(model_in_shm_path))
 
+    @patch('ddp.is_ddp', return_value=True)
+    @patch('ddp.master_proc', return_value=True)
+    def test_train_model_raises_on_mixed_devices(self, mock_master, mock_is_ddp):
+        """DDP wrapping must fail when model parameters span multiple devices."""
+        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
+        model = NeuralNetworkModel("test-mixed", Mapper(layers, {"sgd": {}}))
+
+        # Create mock parameters on different devices
+        mock_p1 = MagicMock()
+        mock_p1.device = torch.device('cpu')
+        mock_p2 = MagicMock()
+        mock_p2.device = torch.device('mps', 0)
+        mixed_params = [mock_p1, mock_p2]
+
+        with patch.object(model, 'parameters', side_effect=lambda: iter(mixed_params)):
+            with self.assertRaises(RuntimeError) as cm:
+                model.train_model("mock_ds", 0, 1, 1, 1, 1)
+            self.assertIn("multiple devices", str(cm.exception))
+
     def test_train_exception_handling(self):
         # Create a tiny model
         layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
@@ -959,7 +978,8 @@ class TestNeuralNetModel(unittest.TestCase):
             NeuralNetworkModel.train_model_on_device(
                 "test_model", "mps", "test_dataset", 0, 1, 1, 1, 1)
             mock_init_pg.assert_called_once_with(backend='gloo')
-            mock_model.to.assert_called_once_with('mps')
+            # MPS falls back to CPU under DDP (gloo doesn't support MPS tensors)
+            mock_model.to.assert_called_once_with('cpu')
 
 
 if __name__ == '__main__':

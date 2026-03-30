@@ -72,6 +72,18 @@ def launch_single_node_ddp(run_id: str, device: str, worker_op: Callable[..., No
     config = LaunchConfig(**launch_kwargs)
     elastic_launch(config, entrypoint=worker_op)(*args)
 
+def effective_device(device: str) -> str:
+    """Return the effective training device under DDP.
+
+    The gloo backend (used for CPU and MPS) only supports CPU tensors,
+    so MPS must fall back to CPU when running under DDP.
+    """
+    if is_ddp() and device == 'mps':
+        log.warning("DDP with gloo backend does not support MPS tensors; "
+                     "falling back to CPU for distributed training.")
+        return 'cpu'
+    return device
+
 def ddp_all_reduce(tensor: Tensor):
     if get_backend() == 'nccl':
         all_reduce(tensor, op=ReduceOp.AVG)

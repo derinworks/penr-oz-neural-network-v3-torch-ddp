@@ -166,5 +166,22 @@ class TestDDP(unittest.TestCase):
         self.assertIn("ddp_file", cfg["root"]["handlers"])
 
 
+    def test_effective_device_mps_under_ddp_falls_back_to_cpu(self):
+        with patch.dict(os.environ, {"RANK": "0"}):
+            self.assertEqual(ddp.effective_device('mps'), 'cpu')
+
+    def test_effective_device_cpu_under_ddp_unchanged(self):
+        with patch.dict(os.environ, {"RANK": "0"}):
+            self.assertEqual(ddp.effective_device('cpu'), 'cpu')
+
+    def test_effective_device_cuda_under_ddp_unchanged(self):
+        with patch.dict(os.environ, {"RANK": "0"}):
+            self.assertEqual(ddp.effective_device('cuda'), 'cuda')
+
+    def test_effective_device_mps_without_ddp_unchanged(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ddp.effective_device('mps'), 'mps')
+
+
 if __name__ == '__main__':
     unittest.main()

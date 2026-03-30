@@ -435,9 +435,10 @@ class NeuralNetworkModel(nn.Module):
             dist.init_process_group(backend=backend)
 
         model = cls.deserialize(model_id)
-        model.to(device)
+        effective = ddp.effective_device(device) if ddp.is_ddp() else device
+        model.to(effective)
         if ddp.master_proc():
-            log.info(f"Moved model {model_id} to device {device}")
+            log.info(f"Moved model {model_id} to device {effective}")
         model.train_model(dataset_id, shard, epochs, batch_size, block_size, step_size)
 
         if ddp.is_ddp():
@@ -501,6 +502,14 @@ class NeuralNetworkModel(nn.Module):
             self.serialize()
             last_serialized = time.time()
         activations: list[Tensor] = []
+        if ddp.is_ddp():
+            # Validate all parameters reside on the same device before DDP wrapping
+            param_devices = {p.device for p in self.parameters()}
+            if len(param_devices) > 1:
+                raise RuntimeError(
+                    f"Cannot wrap model with DDP: parameters span multiple devices "
+                    f"{param_devices}. Move all parameters to a single device first."
+                )
         model = nn.parallel.DistributedDataParallel(self) if ddp.is_ddp() else self
         model.train()
         self.layers.training = True
