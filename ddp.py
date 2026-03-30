@@ -72,9 +72,12 @@ def launch_single_node_ddp(run_id: str, device: str, worker_op: Callable[..., No
     config = LaunchConfig(**launch_kwargs)
     elastic_launch(config, entrypoint=worker_op)(*args)
 
+def use_ddp(device: str) -> bool:
+    if is_ddp() and ddp_world_size() == 1 and device == 'mps':
+        return False
+    return is_ddp()
+
 def ddp_all_reduce(tensor: Tensor):
-    if ddp_world_size() == 1:
-        return  # single-process DDP: no reduction needed
     if get_backend() == 'nccl':
         all_reduce(tensor, op=ReduceOp.AVG)
     else:

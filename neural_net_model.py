@@ -316,8 +316,7 @@ class NeuralNetworkModel(nn.Module):
                 _, step_cost = self(input_tensor, target, skip_softmax=True)
                 # add average step cost per epoch to average cost
                 avg_cost_tensor += step_cost / (epochs * num_steps)
-        if ddp.is_ddp():
-            # reduce avg cost among distributed workers
+        if ddp.use_ddp(device.type):
             ddp.ddp_all_reduce(avg_cost_tensor)
         avg_cost = avg_cost_tensor.item()
         if ddp.master_proc():
@@ -501,21 +500,7 @@ class NeuralNetworkModel(nn.Module):
             self.serialize()
             last_serialized = time.time()
         activations: list[Tensor] = []
-        # MPS always has world_size=1 since Apple Silicon exposes a single MPS device.
-        # Gloo (the only backend available for MPS) does not support MPS tensors, so
-        # wrapping with DDP for a single-process group would cause a device-type error
-        # in allgather/allreduce without any benefit (no actual synchronization needed).
-        # Skip DDP wrapping for single-process groups so MPS training works as intended.
-        use_ddp = ddp.is_ddp() and ddp.ddp_world_size() > 1
-        if use_ddp:
-            # Validate all parameters reside on the same device before DDP wrapping
-            param_devices = {p.device for p in self.parameters()}
-            if len(param_devices) > 1:
-                raise RuntimeError(
-                    f"Cannot wrap model with DDP: parameters span multiple devices "
-                    f"{param_devices}. Move all parameters to a single device first."
-                )
-        model = nn.parallel.DistributedDataParallel(self) if use_ddp else self
+        model = nn.parallel.DistributedDataParallel(self) if ddp.use_ddp(device.type) else self
         model.train()
         self.layers.training = True
 
@@ -553,8 +538,7 @@ class NeuralNetworkModel(nn.Module):
                         if epoch + 1 == epochs or long_training:
                             for a in step_activations:
                                 a.retain_grad()
-                    if use_ddp:
-                        # turn off sync for grad accumulation steps until last step
+                    if ddp.use_ddp(device.type):
                         model.require_backward_grad_sync = (step == num_steps - 1)
                     # back propagate to populate gradients (scaled if needed)
                     if amp_scaler is not None:
@@ -571,8 +555,7 @@ class NeuralNetworkModel(nn.Module):
                     }
                     self.serialize()
                 raise exc
-            if ddp.is_ddp():
-                # reduce cost among distributed workers
+            if ddp.use_ddp(device.type):
                 ddp.ddp_all_reduce(cost)
             # optimize parameters (with gradient unscaling if needed)
             if amp_scaler is not None:

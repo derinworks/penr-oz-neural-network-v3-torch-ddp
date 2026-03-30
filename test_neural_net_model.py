@@ -547,26 +547,6 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertIsNotNone(model)
         self.assertTrue(os.path.exists(model_in_shm_path))
 
-    @patch('ddp.is_ddp', return_value=True)
-    @patch('ddp.ddp_world_size', return_value=2)
-    @patch('ddp.master_proc', return_value=True)
-    def test_train_model_raises_on_mixed_devices(self, mock_master, mock_ws, mock_is_ddp):
-        """DDP wrapping must fail when model parameters span multiple devices (multi-process DDP)."""
-        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
-        model = NeuralNetworkModel("test-mixed", Mapper(layers, {"sgd": {}}))
-
-        # Create mock parameters on different devices
-        mock_p1 = MagicMock()
-        mock_p1.device = torch.device('cpu')
-        mock_p2 = MagicMock()
-        mock_p2.device = torch.device('mps', 0)
-        mixed_params = [mock_p1, mock_p2]
-
-        with patch.object(model, 'parameters', side_effect=lambda: iter(mixed_params)):
-            with self.assertRaises(RuntimeError) as cm:
-                model.train_model("mock_ds", 0, 1, 1, 1, 1)
-            self.assertIn("multiple devices", str(cm.exception))
-
     def test_train_exception_handling(self):
         # Create a tiny model
         layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"tanh": {}}]
@@ -982,11 +962,10 @@ class TestNeuralNetModel(unittest.TestCase):
             # MPS stays on MPS — device is never changed, training runs on MPS
             mock_model.to.assert_called_once_with('mps')
 
+    @patch('ddp.use_ddp', return_value=False)
     @patch('ddp.is_ddp', return_value=True)
     @patch('ddp.master_proc', return_value=True)
-    @patch('ddp.ddp_world_size', return_value=1)
-    def test_train_model_skips_ddp_wrap_for_single_process(self, mock_ws, mock_master, mock_is_ddp):
-        """For world_size=1 (e.g. MPS), DDP wrapping is skipped to avoid gloo MPS errors."""
+    def test_train_model_skips_ddp_wrap_for_mps_single_process(self, mock_master, mock_is_ddp, mock_use_ddp):
         layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
                   {"tanh": {}},
                   {"linear": {"in_features": 2, "out_features": 8}},
@@ -1002,7 +981,6 @@ class TestNeuralNetModel(unittest.TestCase):
             mock_loader.next_batch.return_value = tuple(
                 np.array(l, dtype=np.int32) for l in [[1, 2], [2, 3]])
             model.train_model("mock_ds", 1, 1, 1, 2, 1)
-            # DDP should NOT be used for world_size=1 (avoids gloo+MPS error)
             mock_ddp.assert_not_called()
 
 

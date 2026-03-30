@@ -126,8 +126,7 @@ class TestDDP(unittest.TestCase):
         mock_get_backend.return_value = 'nccl'
         tensor = torch.tensor([1.0, 2.0, 3.0])
 
-        with patch.dict(os.environ, {"WORLD_SIZE": "2"}):
-            ddp.ddp_all_reduce(tensor)
+        ddp.ddp_all_reduce(tensor)
 
         self.assertTrue(mock_all_reduce.called)
 
@@ -167,15 +166,25 @@ class TestDDP(unittest.TestCase):
         self.assertIn("ddp_file", cfg["root"]["handlers"])
 
 
-    @patch('ddp.all_reduce')
-    def test_ddp_all_reduce_noop_when_world_size_one(self, mock_all_reduce):
-        """ddp_all_reduce is a no-op for single-process DDP (world_size=1)."""
-        tensor = torch.tensor([1.0, 2.0, 3.0])
-        with patch.dict(os.environ, {"WORLD_SIZE": "1"}):
-            ddp.ddp_all_reduce(tensor)
-        mock_all_reduce.assert_not_called()
-        # tensor should be unchanged
-        self.assertEqual(tensor.tolist(), [1.0, 2.0, 3.0])
+    def test_use_ddp_false_when_not_ddp(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(ddp.use_ddp('cpu'))
+
+    def test_use_ddp_true_for_cuda(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "2"}):
+            self.assertTrue(ddp.use_ddp('cuda'))
+
+    def test_use_ddp_true_for_cpu(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "4"}):
+            self.assertTrue(ddp.use_ddp('cpu'))
+
+    def test_use_ddp_false_for_mps_single_process(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "1"}):
+            self.assertFalse(ddp.use_ddp('mps'))
+
+    def test_use_ddp_true_for_mps_multi_process(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "2"}):
+            self.assertTrue(ddp.use_ddp('mps'))
 
 
 if __name__ == '__main__':
