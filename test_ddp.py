@@ -166,5 +166,26 @@ class TestDDP(unittest.TestCase):
         self.assertIn("ddp_file", cfg["root"]["handlers"])
 
 
+    def test_use_ddp_false_when_not_ddp(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(ddp.use_ddp('cpu'))
+
+    def test_use_ddp_true_for_cuda(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "2"}):
+            self.assertTrue(ddp.use_ddp('cuda'))
+
+    def test_use_ddp_true_for_cpu(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "4"}):
+            self.assertTrue(ddp.use_ddp('cpu'))
+
+    def test_use_ddp_false_for_mps_single_process(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "1"}):
+            self.assertFalse(ddp.use_ddp('mps'))
+
+    def test_use_ddp_true_for_mps_multi_process(self):
+        with patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "2"}):
+            self.assertTrue(ddp.use_ddp('mps'))
+
+
 if __name__ == '__main__':
     unittest.main()
