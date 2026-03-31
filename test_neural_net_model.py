@@ -955,6 +955,8 @@ class TestNeuralNetModel(unittest.TestCase):
         with patch.object(NeuralNetworkModel, 'deserialize') as mock_deser, \
              patch.object(NeuralNetworkModel, 'train_model') as mock_train:
             mock_model = MagicMock(spec=NeuralNetworkModel)
+            mock_model.optimizer = MagicMock()
+            mock_model.optimizer.state = {}
             mock_deser.return_value = mock_model
             NeuralNetworkModel.train_model_on_device(
                 "test_model", "mps", "test_dataset", 0, 1, 1, 1, 1)
