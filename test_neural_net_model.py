@@ -962,6 +962,27 @@ class TestNeuralNetModel(unittest.TestCase):
             # MPS stays on MPS — device is never changed, training runs on MPS
             mock_model.to.assert_called_once_with('mps')
 
+    @patch('ddp.is_ddp', return_value=False)
+    @patch('ddp.master_proc', return_value=True)
+    def test_train_model_on_device_moves_optimizer_state_to_device(self, mock_master, mock_is_ddp):
+        layers = [{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
+                  {"linear": {"in_features": 2, "out_features": 8}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test-optim-state", Mapper(layers, {"adam": {"lr": .01}}))
+
+        # Simulate optimizer state tensors remaining on CPU after loading from disk (e.g. on subsequent MPS runs)
+        mock_tensor = MagicMock(spec=torch.Tensor)
+        mock_tensor.to.return_value = mock_tensor
+        param = next(iter(model.parameters()))
+        model.optimizer.state[param] = {'exp_avg': mock_tensor, 'exp_avg_sq': mock_tensor}
+
+        with patch.object(NeuralNetworkModel, 'deserialize', return_value=model), \
+             patch.object(NeuralNetworkModel, 'train_model'):
+            NeuralNetworkModel.train_model_on_device("test-optim-state", 'cpu', "mock_ds", 0, 1, 1, 2, 1)
+
+        # Verify all optimizer state tensors were moved to the target device
+        mock_tensor.to.assert_called_with('cpu')
+
     @patch('ddp.use_ddp', return_value=False)
     @patch('ddp.is_ddp', return_value=True)
     @patch('ddp.master_proc', return_value=True)
