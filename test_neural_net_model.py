@@ -980,8 +980,8 @@ class TestNeuralNetModel(unittest.TestCase):
              patch.object(NeuralNetworkModel, 'train_model'):
             NeuralNetworkModel.train_model_on_device("test-optim-state", 'cpu', "mock_ds", 0, 1, 1, 2, 1)
 
-        # Verify all optimizer state tensors were moved to the target device
-        mock_tensor.to.assert_called_with('cpu')
+        # Verify all optimizer state tensors were moved to the actual device of model parameters
+        mock_tensor.to.assert_called_with(next(model.parameters()).device)
 
     @patch('ddp.use_ddp', return_value=False)
     @patch('ddp.is_ddp', return_value=True)
