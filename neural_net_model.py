@@ -437,6 +437,11 @@ class NeuralNetworkModel(nn.Module):
         model.to(device)
         if ddp.master_proc():
             log.info(f"Moved model {model_id} to device {device}")
+        actual_device = next(model.parameters()).device
+        for state in model.optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(actual_device)
         model.train_model(dataset_id, shard, epochs, batch_size, block_size, step_size)
 
         if ddp.is_ddp():
