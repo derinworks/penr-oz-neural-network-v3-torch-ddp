@@ -376,7 +376,7 @@ class NeuralNetworkModel(nn.Module):
 
     @torch.inference_mode()
     def generate_tokens(self, input_context: list, block_size: int, max_new_tokens: int,
-                        temperature=1.0, top_k: int | None=None) -> list:
+                        temperature=1.0, top_k: int | None=None, stop_token: int | None=None) -> list:
         context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
                                                           temperature, top_k)
         # generate up to max new tokens
@@ -384,19 +384,23 @@ class NeuralNetworkModel(nn.Module):
             next_idx = self._generate_next_token(context, block_size, temperature, top_k, softmax_layer)
             # Append next token in for next prediction
             context = torch.cat((context, next_idx), dim=1)
+            # Stop early if stop_token is encountered
+            if stop_token is not None and next_idx[0].item() == stop_token:
+                break
         # extract and return tokens
         tokens = context[0].tolist()
         return tokens
 
     @torch.inference_mode()
     def generate_tokens_stream(self, input_context: list, block_size: int, max_new_tokens: int,
-                               temperature=1.0, top_k: int | None=None):
+                               temperature=1.0, top_k: int | None=None, stop_token: int | None=None):
         """Generate tokens one at a time, yielding each as it is produced.
         :param input_context: Initial token ids
         :param block_size: Max context length
         :param max_new_tokens: Maximum tokens to generate
         :param temperature: Scaling factor for logits
         :param top_k: Optional top-K filtering
+        :param stop_token: Optional token id that halts generation early when predicted as the next token
         :yields: individual token id (int)
         """
         context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
@@ -410,6 +414,9 @@ class NeuralNetworkModel(nn.Module):
             # Yield the newly generated token
             token = next_idx[0].item()
             yield token
+            # Stop early if stop_token is encountered
+            if stop_token is not None and token == stop_token:
+                break
         log.info("Streaming token generation completed")
 
     @classmethod
