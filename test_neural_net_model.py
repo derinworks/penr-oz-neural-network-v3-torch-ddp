@@ -304,6 +304,55 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertFalse(model.layers.training)
 
     @parameterized.expand([
+        ([{"embedding": {"num_embeddings": 18, "embedding_dim": 2}}, {"flatten": {}},
+          {"linear": {"in_features": 6, "out_features": 18}}, {"tanh": {}},
+          {"linear": {"in_features": 18, "out_features": 9}}, {"softmax": {"dim": 1}}],
+         [[0, 5, 8]], 3, 10, False),
+        ([{"summation": [{"embedding": {"num_embeddings": 27, "embedding_dim": 4}},
+                         {"position": {"num_embeddings": 8, "embedding_dim": 4}}]},
+          {"dropout": {"p": 0.2}}] +
+         [{"layernorm": {"normalized_shape": 4, "bias": False}},
+          {"linear": {"in_features": 4, "out_features": 27, "bias": False}},
+          {"softmaxlast": {"dim": -1}}],
+         [[0]], 8, 10, False),
+        ([{"embedding": {"num_embeddings": 18, "embedding_dim": 2}}, {"flatten": {}},
+          {"linear": {"in_features": 6, "out_features": 18}}, {"tanh": {}},
+          {"linear": {"in_features": 18, "out_features": 9}}, {"softmax": {"dim": 1}}],
+         [[0, 5, 8]], 3, 10, True),
+        ([{"summation": [{"embedding": {"num_embeddings": 27, "embedding_dim": 4}},
+                         {"position": {"num_embeddings": 8, "embedding_dim": 4}}]},
+          {"dropout": {"p": 0.2}}] +
+         [{"layernorm": {"normalized_shape": 4, "bias": False}},
+          {"linear": {"in_features": 4, "out_features": 27, "bias": False}},
+          {"softmaxlast": {"dim": -1}}],
+         [[0]], 8, 10, True),
+    ])
+    def test_generate_tokens_with_stop_token_halts_early(self, layers: list[dict], input_context: list,
+                                                         block_size: int, max_new_tokens: int, stream: bool):
+        model = NeuralNetworkModel("test", Mapper(layers, {"sgd": {}}))
+
+        # generate without stop_token to discover the first generated token
+        torch.manual_seed(42)
+        if stream:
+            first_generated = next(iter(model.generate_tokens_stream(input_context, block_size, max_new_tokens)))
+        else:
+            all_tokens = model.generate_tokens(input_context, block_size, max_new_tokens)
+            first_generated = all_tokens[len(input_context[0])]
+
+        # generate with stop_token set to the first generated token
+        torch.manual_seed(42)
+        if stream:
+            stopped_tokens = list(model.generate_tokens_stream(input_context, block_size, max_new_tokens,
+                                                               stop_token=first_generated))
+            # generation should have stopped after the stop_token
+            self.assertEqual(stopped_tokens, [first_generated])
+        else:
+            stopped_tokens = model.generate_tokens(input_context, block_size, max_new_tokens,
+                                                   stop_token=first_generated)
+            # generation should have stopped after the stop_token
+            self.assertEqual(stopped_tokens, input_context[0] + [first_generated])
+
+    @parameterized.expand([
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"tanh": {}},
           {"linear": {"in_features": 2, "out_features": 8}},

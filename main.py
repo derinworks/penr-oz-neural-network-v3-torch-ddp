@@ -231,6 +231,11 @@ class GenerateRequest(ModelRequest):
         examples=[None],
         description="Use Top K results"
     )
+    stop_token: int | None = Field(
+        None,
+        examples=[None],
+        description="Optional token id that halts generation early when predicted as the next token"
+    )
     stream: bool = Field(
         False,
         examples=[False],
@@ -417,11 +422,11 @@ def model_generate(body: GenerateRequest = Body(...)):
         log.info(f"Streaming token generation for model {model_id}")
         def token_stream():
             for token in model.generate_tokens_stream(body.input, body.block_size, body.max_new_tokens,
-                                                      body.temperature, body.top_k):
+                                                      body.temperature, body.top_k, body.stop_token):
                 yield f"{token}\n"
         return StreamingResponse(token_stream(), media_type="text/plain")
     generated_tokens = model.generate_tokens(body.input, body.block_size, body.max_new_tokens,
-                                             body.temperature, body.top_k)
+                                             body.temperature, body.top_k, body.stop_token)
     return {"tokens": generated_tokens}
 
 @app.post("/decode/")

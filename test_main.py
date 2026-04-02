@@ -189,6 +189,57 @@ def test_generate_stream_false_returns_json(mock_deserialized_model):
     assert response.status_code == 200
     assert response.json() == {"tokens": [0, 1, 2]}
 
+@pytest.mark.parametrize("input_context, block_size, max_new_tokens, stop_token, tokens", [
+    ([[0]], 8, 5, 2, [0, 1, 2]),
+    ([[0, 1]], 4, 5, 3, [0, 1, 2, 3]),
+])
+def test_generate_endpoint_with_stop_token(mock_deserialized_model, input_context, block_size,
+                                           max_new_tokens, stop_token, tokens):
+    mock_deserialized_model.generate_tokens.return_value = tokens
+
+    payload = {
+        "model_id": "test",
+        "input": input_context,
+        "block_size": block_size,
+        "max_new_tokens": max_new_tokens,
+        "stop_token": stop_token,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"tokens": tokens}
+    mock_deserialized_model.generate_tokens.assert_called_once_with(
+        input_context, block_size, max_new_tokens, 1.0, None, stop_token
+    )
+
+@pytest.mark.parametrize("input_context, block_size, max_new_tokens, stop_token, tokens", [
+    ([[0]], 8, 5, 2, [1, 2]),
+    ([[0, 1]], 4, 5, 4, [2, 3, 4]),
+])
+def test_generate_stream_endpoint_with_stop_token(mock_deserialized_model, input_context, block_size,
+                                                  max_new_tokens, stop_token, tokens):
+    mock_deserialized_model.generate_tokens_stream.return_value = iter(tokens)
+
+    payload = {
+        "model_id": "test",
+        "input": input_context,
+        "block_size": block_size,
+        "max_new_tokens": max_new_tokens,
+        "stop_token": stop_token,
+        "stream": True,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    expected_body = "".join(f"{t}\n" for t in tokens)
+    assert response.text == expected_body
+    mock_deserialized_model.generate_tokens_stream.assert_called_once_with(
+        input_context, block_size, max_new_tokens, 1.0, None, stop_token
+    )
+
 @patch("main.create_task")
 def test_train_endpoint(mock_create_task, mock_deserialized_model):
     # Prevent creating a real background task and avoid 'coroutine was never awaited' warnings
