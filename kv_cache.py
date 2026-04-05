@@ -47,6 +47,9 @@ class KVCache:
         :return: Tuple of (full_key, full_value) with all cached + new entries.
         """
         t0 = time.monotonic()
+        new_bytes = (
+            key.nelement() * key.element_size() + value.nelement() * value.element_size()
+        )
         if self._keys[layer_idx] is not None:
             full_key = torch.cat([self._keys[layer_idx], key], dim=2)
             full_value = torch.cat([self._values[layer_idx], value], dim=2)
@@ -55,15 +58,10 @@ class KVCache:
             full_value = value
         self._keys[layer_idx] = full_key
         self._values[layer_idx] = full_value
-        # Update metrics
+        # Update metrics incrementally
         self._metrics.num_appends += 1
-        self._metrics.total_entries = sum(
-            k.shape[2] for k in self._keys if k is not None
-        )
-        self._metrics.memory_bytes = sum(
-            k.nelement() * k.element_size() + v.nelement() * v.element_size()
-            for k, v in zip(self._keys, self._values) if k is not None
-        )
+        self._metrics.total_entries += key.shape[2]
+        self._metrics.memory_bytes += new_bytes
         self._metrics.compressed_memory_bytes = self._metrics.memory_bytes
         self._metrics.compression_ratio = 1.0
         self._metrics.last_append_latency_ms = (time.monotonic() - t0) * 1000
@@ -103,7 +101,7 @@ class KVCache:
 class TurboQuantKVCache(KVCache):
     """KV cache with optional int8 scalar quantization.
 
-    Stores cached key/value tensors in int8 format with per-tensor
+    Stores cached key/value tensors in int8 format with per-token
     scale factors for reversible compress/decompress operations.
     Activated via TURBO_QUANT_KV_CACHE=1 environment flag.
     """
@@ -115,12 +113,12 @@ class TurboQuantKVCache(KVCache):
 
     @staticmethod
     def _quantize(tensor: Tensor) -> tuple[Tensor, Tensor]:
-        """Compress a float tensor to int8 with a scale factor.
+        """Compress a float tensor to int8 with per-token scale factors.
 
-        :param tensor: Input float tensor.
-        :return: (quantized int8 tensor, scale factor tensor).
+        :param tensor: Input float tensor of shape (B, H, S, D).
+        :return: (quantized int8 tensor, per-token scale tensor of shape (B, H, S, 1)).
         """
-        abs_max = tensor.abs().amax()
+        abs_max = tensor.abs().amax(dim=-1, keepdim=True)
         scale = abs_max / 127.0
         scale = torch.where(scale == 0, torch.ones_like(scale), scale)
         quantized = (tensor / scale).round().clamp(-128, 127).to(torch.int8)
@@ -128,10 +126,10 @@ class TurboQuantKVCache(KVCache):
 
     @staticmethod
     def _dequantize(quantized: Tensor, scale: Tensor) -> Tensor:
-        """Decompress an int8 tensor back to float.
+        """Decompress an int8 tensor back to float using per-token scales.
 
-        :param quantized: Int8 tensor.
-        :param scale: Scale factor tensor.
+        :param quantized: Int8 tensor of shape (B, H, S, D).
+        :param scale: Per-token scale tensor of shape (B, H, S, 1).
         :return: Reconstructed float tensor.
         """
         return quantized.float() * scale
@@ -139,20 +137,22 @@ class TurboQuantKVCache(KVCache):
     def append(self, layer_idx: int, key: Tensor, value: Tensor) -> tuple[Tensor, Tensor]:
         """Append new key/value tensors with int8 compression.
 
-        New key/value entries are quantized before storage. Returns
+        New key/value entries are quantized with per-token scales before
+        storage. Scales are concatenated along the sequence dimension to
+        preserve correct dequantization of historical entries. Returns
         decompressed full key/value tensors for attention computation.
         """
         t0 = time.monotonic()
-        # Quantize incoming key/value
+        # Quantize incoming key/value with per-token scales
         q_key, s_key = self._quantize(key)
         q_value, s_value = self._quantize(value)
 
         if self._keys[layer_idx] is not None:
             full_q_key = torch.cat([self._keys[layer_idx], q_key], dim=2)
             full_q_value = torch.cat([self._values[layer_idx], q_value], dim=2)
-            # Use the latest scale (covers the full range approximately)
-            full_s_key = torch.max(self._scales_k[layer_idx], s_key)
-            full_s_value = torch.max(self._scales_v[layer_idx], s_value)
+            # Concatenate per-token scales along sequence dimension
+            full_s_key = torch.cat([self._scales_k[layer_idx], s_key], dim=2)
+            full_s_value = torch.cat([self._scales_v[layer_idx], s_value], dim=2)
         else:
             full_q_key = q_key
             full_q_value = q_value
@@ -168,23 +168,21 @@ class TurboQuantKVCache(KVCache):
         full_key = self._dequantize(full_q_key, full_s_key)
         full_value = self._dequantize(full_q_value, full_s_value)
 
-        # Update metrics
+        # Update metrics incrementally
         self._metrics.num_appends += 1
-        self._metrics.total_entries = sum(
-            k.shape[2] for k in self._keys if k is not None
+        self._metrics.total_entries += key.shape[2]
+        compressed_new = (
+            q_key.nelement() * q_key.element_size() + q_value.nelement() * q_value.element_size()
+            + s_key.nelement() * s_key.element_size() + s_value.nelement() * s_value.element_size()
         )
-        compressed_bytes = sum(
-            k.nelement() * k.element_size() + v.nelement() * v.element_size()
-            for k, v in zip(self._keys, self._values) if k is not None
+        uncompressed_new = (
+            key.nelement() * key.element_size() + value.nelement() * value.element_size()
         )
-        uncompressed_bytes = sum(
-            k.nelement() * 4 + v.nelement() * 4  # float32 = 4 bytes
-            for k, v in zip(self._keys, self._values) if k is not None
-        )
-        self._metrics.compressed_memory_bytes = compressed_bytes
-        self._metrics.memory_bytes = uncompressed_bytes
+        self._metrics.compressed_memory_bytes += compressed_new
+        self._metrics.memory_bytes += uncompressed_new
         self._metrics.compression_ratio = (
-            uncompressed_bytes / compressed_bytes if compressed_bytes > 0 else 1.0
+            self._metrics.memory_bytes / self._metrics.compressed_memory_bytes
+            if self._metrics.compressed_memory_bytes > 0 else 1.0
         )
         self._metrics.last_append_latency_ms = (time.monotonic() - t0) * 1000
         return full_key, full_value

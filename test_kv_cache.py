@@ -137,8 +137,8 @@ class TestTurboQuantKVCache(unittest.TestCase):
         cache.append(0, key, value)
         m = cache.metrics
 
-        # int8 is 1 byte vs float32 4 bytes -> ratio ~4
-        self.assertGreater(m.compression_ratio, 3.0)
+        # int8 + per-token scales still smaller than float32
+        self.assertGreater(m.compression_ratio, 1.0)
         self.assertLess(m.compressed_memory_bytes, m.memory_bytes)
 
     def test_append_multiple_steps(self):
@@ -180,6 +180,23 @@ class TestTurboQuantKVCache(unittest.TestCase):
         recovered = TurboQuantKVCache._dequantize(q, scale)
 
         self.assertTrue(torch.equal(recovered, tensor))
+
+    def test_per_token_scales_preserve_accuracy_across_appends(self):
+        cache = TurboQuantKVCache(num_layers=1)
+        # First append: small values
+        k1 = torch.randn(1, 2, 3, 8) * 0.01
+        v1 = torch.randn(1, 2, 3, 8) * 0.01
+        # Second append: large values (very different range)
+        k2 = torch.randn(1, 2, 1, 8) * 100.0
+        v2 = torch.randn(1, 2, 1, 8) * 100.0
+
+        cache.append(0, k1, v1)
+        full_k, full_v = cache.append(0, k2, v2)
+
+        # The first 3 positions should still be close to k1
+        # With per-token scales this works; with a global scale it would fail
+        self.assertTrue(torch.allclose(full_k[:, :, :3, :], k1, atol=0.01))
+        self.assertTrue(torch.allclose(full_k[:, :, 3:, :], k2, atol=5.0))
 
 
 class TestCreateKVCache(unittest.TestCase):
