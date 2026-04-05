@@ -15,7 +15,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.optim import Optimizer
 import ddp
-from neural_net_layers import SoftmaxOnLast
+from kv_cache import KVCache, create_kv_cache
+from neural_net_layers import CausalSelfAttention, PositionEmbedding, SoftmaxOnLast
 from loaders import Loader
 from mappers import Mapper
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -326,19 +327,34 @@ class NeuralNetworkModel(nn.Module):
 
     @torch.inference_mode()
     def _generate_next_token(self, context: Tensor, block_size: int, temperature: float,
-                             top_k: int | None, softmax_layer) -> Tensor:
+                             top_k: int | None, softmax_layer,
+                             kv_cache: KVCache | None = None) -> Tensor:
         """Generate a single next token given the current context.
         :param context: Current token context tensor
         :param block_size: Max context length
         :param temperature: Scaling factor for logits
         :param top_k: Optional top-K filtering
         :param softmax_layer: Softmax layer for probability computation
+        :param kv_cache: Optional KV cache for incremental decoding
         :return: next token index tensor
         """
-        # crop context to the last block size tokens
-        cropped_context = context[:, -block_size:]
+        if kv_cache is not None and kv_cache.seq_len() > 0:
+            if kv_cache.seq_len() >= block_size:
+                # Cache exceeds block_size: clear and re-prefill with cropped context
+                kv_cache.clear()
+                model_input = context[:, -block_size:]
+                for pos_emb in self._find_position_embeddings():
+                    pos_emb.position_offset = 0
+            else:
+                # Incremental decode: only pass the last token
+                model_input = context[:, -1:]
+                for pos_emb in self._find_position_embeddings():
+                    pos_emb.position_offset = kv_cache.seq_len()
+        else:
+            # Prefill or no cache: crop context to the last block size tokens
+            model_input = context[:, -block_size:]
         # Predict next token
-        activations, _ = self(cropped_context, skip_softmax=True)
+        activations, _ = self(model_input, skip_softmax=True)
         logits: Tensor = activations[-1]
         if temperature == 0.0:  # zero temperature means maximum logit is next
             next_idx = logits[:, -1, :].argmax(dim=-1, keepdim=True)
@@ -354,6 +370,31 @@ class NeuralNetworkModel(nn.Module):
             probs = softmax_layer.forward(logits / temperature)
             next_idx = torch.multinomial(probs, num_samples=1)
         return next_idx
+
+    def _find_attention_layers(self) -> list[CausalSelfAttention]:
+        """Find all CausalSelfAttention modules in the model."""
+        return [m for m in self.modules() if isinstance(m, CausalSelfAttention)]
+
+    def _attach_kv_cache(self) -> KVCache:
+        """Create and attach a KV cache to all attention layers."""
+        attn_layers = self._find_attention_layers()
+        if not attn_layers:
+            return None
+        cache = create_kv_cache(len(attn_layers))
+        for idx, attn in enumerate(attn_layers):
+            attn.set_kv_cache(cache, idx)
+        return cache
+
+    def _find_position_embeddings(self) -> list[PositionEmbedding]:
+        """Find all PositionEmbedding modules in the model."""
+        return [m for m in self.modules() if isinstance(m, PositionEmbedding)]
+
+    def _detach_kv_cache(self):
+        """Detach KV cache from all attention layers and reset position offsets."""
+        for attn in self._find_attention_layers():
+            attn.set_kv_cache(None, 0)
+        for pos_emb in self._find_position_embeddings():
+            pos_emb.position_offset = 0
 
     def _prepare_generation(self, input_context: list, max_new_tokens: int, temperature: float,
                             top_k: int | None):
@@ -379,14 +420,21 @@ class NeuralNetworkModel(nn.Module):
                         temperature=1.0, top_k: int | None=None, stop_token: int | None=None) -> list:
         context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
                                                           temperature, top_k)
-        # generate up to max new tokens
-        for sample_idx in range(max_new_tokens):
-            next_idx = self._generate_next_token(context, block_size, temperature, top_k, softmax_layer)
-            # Append next token in for next prediction
-            context = torch.cat((context, next_idx), dim=1)
-            # Stop early if stop_token is encountered
-            if stop_token is not None and next_idx[0].item() == stop_token:
-                break
+        cache = self._attach_kv_cache()
+        try:
+            # generate up to max new tokens
+            for sample_idx in range(max_new_tokens):
+                next_idx = self._generate_next_token(context, block_size, temperature, top_k,
+                                                     softmax_layer, cache)
+                # Append next token in for next prediction
+                context = torch.cat((context, next_idx), dim=1)
+                # Stop early if stop_token is encountered
+                if stop_token is not None and next_idx[0].item() == stop_token:
+                    break
+        finally:
+            if cache is not None:
+                cache.log_metrics()
+            self._detach_kv_cache()
         # extract and return tokens
         tokens = context[0].tolist()
         return tokens
@@ -405,19 +453,26 @@ class NeuralNetworkModel(nn.Module):
         """
         context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
                                                           temperature, top_k)
-        log.info("Streaming token generation started")
-        # generate up to max new tokens
-        for sample_idx in range(max_new_tokens):
-            next_idx = self._generate_next_token(context, block_size, temperature, top_k, softmax_layer)
-            # Append next token in for next prediction
-            context = torch.cat((context, next_idx), dim=1)
-            # Yield the newly generated token
-            token = next_idx[0].item()
-            yield token
-            # Stop early if stop_token is encountered
-            if stop_token is not None and token == stop_token:
-                break
-        log.info("Streaming token generation completed")
+        cache = self._attach_kv_cache()
+        try:
+            log.info("Streaming token generation started")
+            # generate up to max new tokens
+            for sample_idx in range(max_new_tokens):
+                next_idx = self._generate_next_token(context, block_size, temperature, top_k,
+                                                     softmax_layer, cache)
+                # Append next token in for next prediction
+                context = torch.cat((context, next_idx), dim=1)
+                # Yield the newly generated token
+                token = next_idx[0].item()
+                yield token
+                # Stop early if stop_token is encountered
+                if stop_token is not None and token == stop_token:
+                    break
+            log.info("Streaming token generation completed")
+        finally:
+            if cache is not None:
+                cache.log_metrics()
+            self._detach_kv_cache()
 
     @classmethod
     def train_model_on_device(cls, model_id: str, device: str, dataset_id: str, shard: int,
