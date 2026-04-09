@@ -207,6 +207,130 @@ class TestMapper(unittest.TestCase):
         self.assertEqual(tok_emb["embedding_dim"], 32)
 
 
+    # ---- Gemma from_hf_config tests ----
+
+    def _make_gemma_config(self, model_type="gemma3", n_layer=2, hidden_size=64,
+                            num_attention_heads=4, num_key_value_heads=2,
+                            head_dim=16, vocab_size=128, intermediate_size=128,
+                            rms_norm_eps=1e-6, rope_theta=10000.0,
+                            attention_dropout=0.0,
+                            hidden_activation="gelu_pytorch_tanh"):
+        cfg = MagicMock()
+        cfg.model_type = model_type
+        cfg.vocab_size = vocab_size
+        cfg.hidden_size = hidden_size
+        cfg.num_attention_heads = num_attention_heads
+        cfg.num_key_value_heads = num_key_value_heads
+        cfg.head_dim = head_dim
+        cfg.num_hidden_layers = n_layer
+        cfg.intermediate_size = intermediate_size
+        cfg.rms_norm_eps = rms_norm_eps
+        cfg.rope_theta = rope_theta
+        cfg.attention_dropout = attention_dropout
+        cfg.hidden_activation = hidden_activation
+        return cfg
+
+    def test_from_hf_config_gemma_layer_count(self):
+        """Gemma: 1 embedding + n_layer blocks + 3 final."""
+        n_layer = 3
+        cfg = self._make_gemma_config(n_layer=n_layer)
+        layers = Mapper.from_hf_config(cfg)
+        self.assertEqual(len(layers), 1 + n_layer + 3)
+
+    def test_from_hf_config_gemma_scaled_embedding(self):
+        """First layer is a scaled embedding."""
+        cfg = self._make_gemma_config(hidden_size=64, vocab_size=256)
+        layers = Mapper.from_hf_config(cfg)
+        self.assertIn("scaledembedding", layers[0])
+        emb = layers[0]["scaledembedding"]
+        self.assertEqual(emb["num_embeddings"], 256)
+        self.assertEqual(emb["embedding_dim"], 64)
+        self.assertAlmostEqual(emb["scale"], 64 ** 0.5)
+
+    def test_from_hf_config_gemma_transformer_blocks(self):
+        """Gemma blocks are TransformerBlocks with attn_block and mlp_block."""
+        cfg = self._make_gemma_config(n_layer=2)
+        layers = Mapper.from_hf_config(cfg)
+        for i in range(2):
+            block = layers[1 + i]
+            self.assertIn("transformerblock", block)
+            tb = block["transformerblock"]
+            self.assertIn("attn_block", tb)
+            self.assertIn("mlp_block", tb)
+            attn_seq = tb["attn_block"]["sequential"]
+            self.assertIn("rmsnorm", attn_seq[0])
+            self.assertIn("linear", attn_seq[1])
+            self.assertIn("attention", attn_seq[2])
+            self.assertIn("linear", attn_seq[3])
+            mlp_seq = tb["mlp_block"]["sequential"]
+            self.assertIn("rmsnorm", mlp_seq[0])
+            self.assertIn("gatedmlp", mlp_seq[1])
+
+    def test_from_hf_config_gemma3_has_post_norms(self):
+        """Gemma 2+ variants include post-attention and post-MLP norms."""
+        for model_type in ("gemma2", "gemma3", "gemma3_text", "gemma4"):
+            cfg = self._make_gemma_config(model_type=model_type, n_layer=1)
+            layers = Mapper.from_hf_config(cfg)
+            tb = layers[1]["transformerblock"]
+            self.assertIn("post_attn_norm", tb, f"Missing post_attn_norm for {model_type}")
+            self.assertIn("post_mlp_norm", tb, f"Missing post_mlp_norm for {model_type}")
+
+    def test_from_hf_config_gemma1_no_post_norms(self):
+        """Gemma 1 does not have post-norms."""
+        cfg = self._make_gemma_config(model_type="gemma", n_layer=1)
+        layers = Mapper.from_hf_config(cfg)
+        tb = layers[1]["transformerblock"]
+        self.assertNotIn("post_attn_norm", tb)
+        self.assertNotIn("post_mlp_norm", tb)
+
+    def test_from_hf_config_gemma_attention_params(self):
+        """Attention layer carries GQA and RoPE parameters."""
+        cfg = self._make_gemma_config(num_attention_heads=8, num_key_value_heads=4,
+                                       rope_theta=1e6, attention_dropout=0.1)
+        layers = Mapper.from_hf_config(cfg)
+        attn_cfg = layers[1]["transformerblock"]["attn_block"]["sequential"][2]["attention"]
+        self.assertEqual(attn_cfg["num_heads"], 8)
+        self.assertEqual(attn_cfg["num_kv_heads"], 4)
+        self.assertAlmostEqual(attn_cfg["rope_theta"], 1e6)
+        self.assertAlmostEqual(attn_cfg["dropout"], 0.1)
+
+    def test_from_hf_config_gemma_qkv_dim(self):
+        """QKV linear out_features matches n_head*head_dim + 2*n_kv_heads*head_dim."""
+        cfg = self._make_gemma_config(num_attention_heads=8, num_key_value_heads=4, head_dim=16,
+                                       hidden_size=64)
+        layers = Mapper.from_hf_config(cfg)
+        qkv_linear = layers[1]["transformerblock"]["attn_block"]["sequential"][1]["linear"]
+        expected_qkv = 8 * 16 + 2 * 4 * 16  # 128 + 128 = 256
+        self.assertEqual(qkv_linear["in_features"], 64)
+        self.assertEqual(qkv_linear["out_features"], expected_qkv)
+
+    def test_from_hf_config_gemma_final_layers(self):
+        """Last three layers are rmsnorm, linear (lm_head), softmaxlast."""
+        n_layer = 2
+        cfg = self._make_gemma_config(n_layer=n_layer, hidden_size=64, vocab_size=128)
+        layers = Mapper.from_hf_config(cfg)
+        self.assertIn("rmsnorm", layers[1 + n_layer])
+        self.assertIn("linear", layers[1 + n_layer + 1])
+        lm = layers[1 + n_layer + 1]["linear"]
+        self.assertEqual(lm["in_features"], 64)
+        self.assertEqual(lm["out_features"], 128)
+        self.assertFalse(lm["bias"])
+        self.assertIn("softmaxlast", layers[1 + n_layer + 2])
+
+    def test_from_hf_config_gemma_builds_valid_mapper(self):
+        """Layers returned by from_hf_config can be built by Mapper for Gemma."""
+        cfg = self._make_gemma_config(model_type="gemma3", n_layer=1, hidden_size=32,
+                                       num_attention_heads=2, num_key_value_heads=2,
+                                       head_dim=16, vocab_size=64, intermediate_size=64)
+        layers = Mapper.from_hf_config(cfg)
+        mapper = Mapper(layers, {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}})
+        nn_layers = mapper.to_layers()
+        self.assertEqual(len(nn_layers), len(layers))
+        self.assertIsInstance(nn_layers[0], nnl.ScaledEmbedding)
+        self.assertIsInstance(nn_layers[1], nnl.TransformerBlock)
+        self.assertIsInstance(nn_layers[-1], nnl.SoftmaxOnLast)
+
+
     def _make_hf_sd(self, n_layer=2, n_embd=32, n_head=2, vocab_size=64, block_size=16):
         """Build a fake HuggingFace GPT-2 state dict with the right shapes."""
         sd = {}
@@ -260,6 +384,127 @@ class TestMapper(unittest.TestCase):
         mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer)
         lm_idx = 2 + n_layer + 1
         self.assertTrue(torch.equal(mapped[f"layers.{lm_idx}.weight"], lm_head))
+
+
+    # ---- Gemma state dict mapping tests ----
+
+    def _make_gemma_hf_sd(self, model_type="gemma3", n_layer=2, n_embd=32,
+                           n_head=4, n_kv_heads=2, head_dim=8,
+                           vocab_size=64, intermediate_size=64):
+        """Build a fake HuggingFace Gemma state dict."""
+        sd = {}
+        sd["model.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
+        has_post_norms = model_type != "gemma"
+        for i in range(n_layer):
+            p = f"model.layers.{i}"
+            sd[f"{p}.input_layernorm.weight"] = torch.zeros(n_embd)
+            sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * head_dim, n_embd)
+            sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
+            sd[f"{p}.self_attn.v_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
+            sd[f"{p}.self_attn.o_proj.weight"] = torch.zeros(n_embd, n_head * head_dim)
+            if has_post_norms:
+                sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
+                sd[f"{p}.pre_feedforward_layernorm.weight"] = torch.zeros(n_embd)
+                sd[f"{p}.post_feedforward_layernorm.weight"] = torch.zeros(n_embd)
+            else:
+                sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
+            sd[f"{p}.mlp.gate_proj.weight"] = torch.zeros(intermediate_size, n_embd)
+            sd[f"{p}.mlp.up_proj.weight"] = torch.zeros(intermediate_size, n_embd)
+            sd[f"{p}.mlp.down_proj.weight"] = torch.zeros(n_embd, intermediate_size)
+        sd["model.norm.weight"] = torch.zeros(n_embd)
+        return sd
+
+    def _make_gemma_hf_config(self, model_type="gemma3", n_layer=2, hidden_size=32,
+                               num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+                               vocab_size=64, intermediate_size=64):
+        cfg = MagicMock()
+        cfg.model_type = model_type
+        cfg.vocab_size = vocab_size
+        cfg.hidden_size = hidden_size
+        cfg.num_attention_heads = num_attention_heads
+        cfg.num_key_value_heads = num_key_value_heads
+        cfg.head_dim = head_dim
+        cfg.num_hidden_layers = n_layer
+        cfg.intermediate_size = intermediate_size
+        cfg.rms_norm_eps = 1e-6
+        cfg.rope_theta = 10000.0
+        cfg.attention_dropout = 0.0
+        cfg.hidden_activation = "gelu_pytorch_tanh"
+        return cfg
+
+    def test_gemma_qkv_weights_are_concatenated(self):
+        """Separate Q, K, V weights are concatenated into single QKV tensor."""
+        n_layer, n_embd, n_head, n_kv_heads, head_dim = 1, 32, 4, 2, 8
+        hf_sd = self._make_gemma_hf_sd(n_layer=n_layer, n_embd=n_embd, n_head=n_head,
+                                         n_kv_heads=n_kv_heads, head_dim=head_dim)
+        hf_cfg = self._make_gemma_hf_config(n_layer=n_layer, hidden_size=n_embd,
+                                              num_attention_heads=n_head,
+                                              num_key_value_heads=n_kv_heads,
+                                              head_dim=head_dim)
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
+        qkv_dim = n_head * head_dim + 2 * n_kv_heads * head_dim
+        self.assertEqual(mapped["layers.1.attn_block.1.weight"].shape, (qkv_dim, n_embd))
+
+    def test_gemma_rmsnorm_offset_applied(self):
+        """Gemma RMSNorm weights get +1 applied during mapping."""
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma", n_layer=1)
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma", n_layer=1)
+        # Set input_layernorm to known values
+        hf_sd["model.layers.0.input_layernorm.weight"] = torch.ones(32) * 0.5
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, 1, hf_cfg)
+        expected = torch.ones(32) * 1.5  # 0.5 + 1
+        self.assertTrue(torch.allclose(mapped["layers.1.attn_block.0.weight"], expected))
+
+    def test_gemma_tied_lm_head_uses_embed_tokens(self):
+        """When lm_head.weight is absent, embed_tokens weight is used."""
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma", n_layer=1)
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma", n_layer=1)
+        self.assertNotIn("lm_head.weight", hf_sd)
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, 1, hf_cfg)
+        lm_idx = 1 + 1 + 1  # 1 emb + 1 block + 1 norm + (idx)
+        self.assertTrue(torch.equal(mapped[f"layers.{lm_idx}.weight"],
+                                    hf_sd["model.embed_tokens.weight"]))
+
+    def test_gemma3_post_norms_mapped(self):
+        """Gemma 2+ models map post-attention and post-feedforward norms."""
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma3", n_layer=1)
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma3", n_layer=1)
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, 1, hf_cfg)
+        self.assertIn("layers.1.post_attn_norm.weight", mapped)
+        self.assertIn("layers.1.post_mlp_norm.weight", mapped)
+
+    def test_gemma1_no_post_norms_in_mapping(self):
+        """Gemma 1 mapping does not produce post-norm keys."""
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma", n_layer=1)
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma", n_layer=1)
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, 1, hf_cfg)
+        self.assertNotIn("layers.1.post_attn_norm.weight", mapped)
+        self.assertNotIn("layers.1.post_mlp_norm.weight", mapped)
+
+    def test_gemma_mapped_keys_match_model_state_dict(self):
+        """Mapped keys exactly match the keys expected by a fresh NeuralNetworkModel built from the same config."""
+        for model_type in ("gemma", "gemma3"):
+            n_layer, n_embd, n_head, n_kv_heads, head_dim = 2, 32, 4, 2, 8
+            vocab_size, intermediate_size = 64, 64
+            hf_sd = self._make_gemma_hf_sd(model_type=model_type, n_layer=n_layer,
+                                             n_embd=n_embd, n_head=n_head,
+                                             n_kv_heads=n_kv_heads, head_dim=head_dim,
+                                             vocab_size=vocab_size,
+                                             intermediate_size=intermediate_size)
+            hf_cfg = self._make_gemma_hf_config(model_type=model_type, n_layer=n_layer,
+                                                  hidden_size=n_embd,
+                                                  num_attention_heads=n_head,
+                                                  num_key_value_heads=n_kv_heads,
+                                                  head_dim=head_dim,
+                                                  vocab_size=vocab_size,
+                                                  intermediate_size=intermediate_size)
+            layers_config = Mapper.from_hf_config(hf_cfg)
+            from neural_net_model import NeuralNetworkModel
+            model = NeuralNetworkModel("tmp", Mapper(layers_config,
+                                       {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
+            mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
+            self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()),
+                             f"Key mismatch for model_type={model_type}")
 
 
 if __name__ == '__main__':

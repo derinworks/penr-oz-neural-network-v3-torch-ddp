@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 import ddp
 from kv_cache import KVCache, create_kv_cache
-from neural_net_layers import CausalSelfAttention, PositionEmbedding, SoftmaxOnLast
+from neural_net_layers import CausalSelfAttention, PositionEmbedding, SoftmaxOnLast, TransformerBlock
 from loaders import Loader
 from mappers import Mapper
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -165,15 +165,17 @@ class NeuralNetworkModel(nn.Module):
         revision: Optional[str] = None,
         device: str = "cpu",
     ) -> "NeuralNetworkModel":
-        """Import a HuggingFace GPT-2 family model into the internal format.
+        """Import a HuggingFace model into the internal format.
 
         Downloads config and weights from HuggingFace Hub, builds a fresh
         ``NeuralNetworkModel`` with matching architecture, maps the weights,
         serializes to disk/SHM, and returns the ready-to-use model.
 
+        Supports GPT-2 family models and Gemma family models.
+
         :param model_id: Internal model id used for serialization.
         :param hf_repo_id: HuggingFace repo id, e.g. ``"gpt2"`` or
-            ``"openai-community/gpt2-medium"``.
+            ``"google/gemma-3-1b"``.
         :param revision: Optional HuggingFace revision / branch / tag.
         :param device: PyTorch device string (default ``"cpu"``).
         :return: Loaded ``NeuralNetworkModel`` instance.
@@ -197,7 +199,7 @@ class NeuralNetworkModel(nn.Module):
             low_cpu_mem_usage=True,
         )
 
-        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_model.state_dict(), n_layer)
+        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_model.state_dict(), n_layer, hf_config)
         model.load_state_dict(mapped_sd, strict=True)
         log.info(f"Loaded HuggingFace weights into model {model_id}")
 

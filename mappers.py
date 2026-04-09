@@ -7,6 +7,11 @@ from torch.optim import Optimizer
 import neural_net_layers as nnl
 
 
+_GEMMA_MODEL_TYPES = frozenset({
+    'gemma', 'gemma2', 'gemma3', 'gemma3_text', 'gemma4',
+})
+
+
 class Mapper:
     _algo_to_func = {
         "embedding": nn.Embedding,
@@ -26,6 +31,10 @@ class Mapper:
         "residual": nnl.ResidualConnection,
         "position": nnl.PositionEmbedding,
         "softmaxlast": nnl.SoftmaxOnLast,
+        "rmsnorm": nnl.RMSNorm,
+        "gatedmlp": nnl.GatedMLP,
+        "scaledembedding": nnl.ScaledEmbedding,
+        "transformerblock": nnl.TransformerBlock,
     }
 
     _init_weight_to_func = {
@@ -91,11 +100,18 @@ class Mapper:
     def from_hf_config(cls, hf_config) -> list[dict]:
         """Build internal layers config list from a HuggingFace model config.
 
-        Supports GPT-2 family configs (and any config using the same attribute names).
+        Supports GPT-2 family and Gemma family configs.
 
         :param hf_config: A HuggingFace ``PretrainedConfig`` instance.
         :return: Layer config list compatible with ``Mapper.__init__`` ``layers`` argument.
         """
+        model_type = getattr(hf_config, "model_type", None)
+        if isinstance(model_type, str) and model_type in _GEMMA_MODEL_TYPES:
+            return cls._build_gemma_layers(hf_config)
+        return cls._build_gpt2_layers(hf_config)
+
+    @classmethod
+    def _build_gpt2_layers(cls, hf_config) -> list[dict]:
         vocab_size = hf_config.vocab_size
         n_embd = getattr(hf_config, "n_embd", None)
         if n_embd is None:
@@ -149,6 +165,62 @@ class Mapper:
 
         return layers
 
+    @classmethod
+    def _build_gemma_layers(cls, hf_config) -> list[dict]:
+        model_type = hf_config.model_type
+        vocab_size = hf_config.vocab_size
+        n_embd = hf_config.hidden_size
+        n_head = hf_config.num_attention_heads
+        n_kv_heads = getattr(hf_config, "num_key_value_heads", n_head)
+        head_dim = getattr(hf_config, "head_dim", n_embd // n_head)
+        n_layer = hf_config.num_hidden_layers
+        intermediate_size = getattr(hf_config, "intermediate_size", 4 * n_embd)
+        rms_norm_eps = getattr(hf_config, "rms_norm_eps", 1e-6)
+        rope_theta = getattr(hf_config, "rope_theta", 10000.0)
+        attn_dropout = getattr(hf_config, "attention_dropout", 0.0)
+        activation = (getattr(hf_config, "hidden_activation", None)
+                      or getattr(hf_config, "hidden_act", "gelu_pytorch_tanh"))
+        has_post_norms = model_type != "gemma"
+
+        qkv_dim = n_head * head_dim + 2 * n_kv_heads * head_dim
+        attn_out_dim = n_head * head_dim
+
+        layers: list[dict] = [
+            {"scaledembedding": {
+                "num_embeddings": vocab_size,
+                "embedding_dim": n_embd,
+                "scale": float(n_embd ** 0.5),
+            }},
+        ]
+
+        for _ in range(n_layer):
+            block: dict = {
+                "attn_block": {"sequential": [
+                    {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
+                    {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
+                    {"attention": {"num_heads": n_head, "num_kv_heads": n_kv_heads,
+                                   "dropout": attn_dropout, "rope_theta": rope_theta}},
+                    {"linear": {"in_features": attn_out_dim, "out_features": n_embd, "bias": False}},
+                ]},
+                "mlp_block": {"sequential": [
+                    {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
+                    {"gatedmlp": {"in_features": n_embd, "intermediate_size": intermediate_size,
+                                  "bias": False, "activation": activation}},
+                ]},
+            }
+            if has_post_norms:
+                block["post_attn_norm"] = {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}}
+                block["post_mlp_norm"] = {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}}
+            layers.append({"transformerblock": block})
+
+        layers.extend([
+            {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
+            {"linear": {"in_features": n_embd, "out_features": vocab_size, "bias": False}},
+            {"softmaxlast": {"dim": -1}},
+        ])
+
+        return layers
+
     def to_layers(self) -> list[nn.Module]:
         return [self._to_layer(l) for l in self.layers]
 
@@ -162,13 +234,21 @@ class Mapper:
             raise ValueError(f"Unsupported optimizer: {self.optimizer}")
 
     @classmethod
-    def map_hf_state_dict_to_custom(cls, hf_sd: dict, n_layer: int) -> dict:
-        """Map a GPT-2 HuggingFace state dict to the internal custom key names.
+    def map_hf_state_dict_to_custom(cls, hf_sd: dict, n_layer: int, hf_config=None) -> dict:
+        """Map a HuggingFace state dict to the internal custom key names.
 
-        :param hf_sd: State dict from a HuggingFace GPT-2 model.
+        :param hf_sd: State dict from a HuggingFace model.
         :param n_layer: Number of transformer blocks.
+        :param hf_config: Optional HuggingFace config for model-type detection.
         :return: State dict with keys matching the internal ``NeuralNetworkModel`` naming.
         """
+        model_type = getattr(hf_config, "model_type", None) if hf_config is not None else None
+        if isinstance(model_type, str) and model_type in _GEMMA_MODEL_TYPES:
+            return cls._map_gemma_state_dict(hf_sd, n_layer, hf_config)
+        return cls._map_gpt2_state_dict(hf_sd, n_layer)
+
+    @classmethod
+    def _map_gpt2_state_dict(cls, hf_sd: dict, n_layer: int) -> dict:
         mapped = {}
 
         # Token and position embeddings (layer 0 is a Summation of the two)
@@ -202,6 +282,58 @@ class Mapper:
 
         # LM head – use explicit lm_head.weight when available, else fall back to tied wte weight
         lm_head_weight = hf_sd.get("lm_head.weight", hf_sd["transformer.wte.weight"])
+        mapped[f"layers.{ln_f_idx + 1}.weight"] = lm_head_weight
+
+        return mapped
+
+    @classmethod
+    def _map_gemma_state_dict(cls, hf_sd: dict, n_layer: int, hf_config) -> dict:
+        mapped = {}
+        model_type = hf_config.model_type
+        has_post_norms = model_type != "gemma"
+
+        # Token embedding (layer 0 is ScaledEmbedding)
+        mapped["layers.0.weight"] = hf_sd["model.embed_tokens.weight"]
+
+        for i in range(n_layer):
+            block_idx = 1 + i  # 0=embedding, 1+=transformer blocks
+            hf = f"model.layers.{i}"
+
+            # Attention pre-norm (Gemma uses 1+weight centered RMSNorm; convert to standard)
+            mapped[f"layers.{block_idx}.attn_block.0.weight"] = hf_sd[f"{hf}.input_layernorm.weight"] + 1
+
+            # QKV projection (concatenate separate Q, K, V into single tensor)
+            q = hf_sd[f"{hf}.self_attn.q_proj.weight"]
+            k = hf_sd[f"{hf}.self_attn.k_proj.weight"]
+            v = hf_sd[f"{hf}.self_attn.v_proj.weight"]
+            mapped[f"layers.{block_idx}.attn_block.1.weight"] = torch.cat([q, k, v], dim=0)
+
+            # Output projection
+            mapped[f"layers.{block_idx}.attn_block.3.weight"] = hf_sd[f"{hf}.self_attn.o_proj.weight"]
+
+            if has_post_norms:
+                mapped[f"layers.{block_idx}.post_attn_norm.weight"] = (
+                    hf_sd[f"{hf}.post_attention_layernorm.weight"] + 1)
+                mapped[f"layers.{block_idx}.mlp_block.0.weight"] = (
+                    hf_sd[f"{hf}.pre_feedforward_layernorm.weight"] + 1)
+                mapped[f"layers.{block_idx}.post_mlp_norm.weight"] = (
+                    hf_sd[f"{hf}.post_feedforward_layernorm.weight"] + 1)
+            else:
+                # Gemma 1: post_attention_layernorm acts as the pre-MLP norm
+                mapped[f"layers.{block_idx}.mlp_block.0.weight"] = (
+                    hf_sd[f"{hf}.post_attention_layernorm.weight"] + 1)
+
+            # Gated MLP
+            mapped[f"layers.{block_idx}.mlp_block.1.gate_proj.weight"] = hf_sd[f"{hf}.mlp.gate_proj.weight"]
+            mapped[f"layers.{block_idx}.mlp_block.1.up_proj.weight"] = hf_sd[f"{hf}.mlp.up_proj.weight"]
+            mapped[f"layers.{block_idx}.mlp_block.1.down_proj.weight"] = hf_sd[f"{hf}.mlp.down_proj.weight"]
+
+        # Final RMSNorm
+        ln_f_idx = 1 + n_layer
+        mapped[f"layers.{ln_f_idx}.weight"] = hf_sd["model.norm.weight"] + 1
+
+        # LM head – use explicit lm_head.weight when available, else tied embedding
+        lm_head_weight = hf_sd.get("lm_head.weight", hf_sd["model.embed_tokens.weight"])
         mapped[f"layers.{ln_f_idx + 1}.weight"] = lm_head_weight
 
         return mapped

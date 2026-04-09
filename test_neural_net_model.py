@@ -993,6 +993,104 @@ class TestNeuralNetModel(unittest.TestCase):
         )
 
 
+    # ---- Gemma import tests ----
+
+    def _make_gemma_hf_config(self, model_type="gemma3", n_layer=1,
+                               hidden_size=32, num_attention_heads=4,
+                               num_key_value_heads=2, head_dim=8,
+                               vocab_size=64, intermediate_size=64):
+        cfg = MagicMock(spec=[])
+        cfg.model_type = model_type
+        cfg.vocab_size = vocab_size
+        cfg.hidden_size = hidden_size
+        cfg.num_attention_heads = num_attention_heads
+        cfg.num_key_value_heads = num_key_value_heads
+        cfg.head_dim = head_dim
+        cfg.num_hidden_layers = n_layer
+        cfg.intermediate_size = intermediate_size
+        cfg.rms_norm_eps = 1e-6
+        cfg.rope_theta = 10000.0
+        cfg.attention_dropout = 0.0
+        cfg.hidden_activation = "gelu_pytorch_tanh"
+        return cfg
+
+    def _make_gemma_hf_sd(self, model_type="gemma3", n_layer=1, n_embd=32,
+                           n_head=4, n_kv_heads=2, head_dim=8,
+                           vocab_size=64, intermediate_size=64):
+        sd = {}
+        sd["model.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
+        has_post_norms = model_type != "gemma"
+        for i in range(n_layer):
+            p = f"model.layers.{i}"
+            sd[f"{p}.input_layernorm.weight"] = torch.zeros(n_embd)
+            sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * head_dim, n_embd)
+            sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
+            sd[f"{p}.self_attn.v_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
+            sd[f"{p}.self_attn.o_proj.weight"] = torch.zeros(n_embd, n_head * head_dim)
+            if has_post_norms:
+                sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
+                sd[f"{p}.pre_feedforward_layernorm.weight"] = torch.zeros(n_embd)
+                sd[f"{p}.post_feedforward_layernorm.weight"] = torch.zeros(n_embd)
+            else:
+                sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
+            sd[f"{p}.mlp.gate_proj.weight"] = torch.zeros(intermediate_size, n_embd)
+            sd[f"{p}.mlp.up_proj.weight"] = torch.zeros(intermediate_size, n_embd)
+            sd[f"{p}.mlp.down_proj.weight"] = torch.zeros(n_embd, intermediate_size)
+        sd["model.norm.weight"] = torch.zeros(n_embd)
+        return sd
+
+    def test_gemma_mapped_keys_match_model_state_dict(self):
+        """Mapped Gemma keys must exactly match a fresh model's state dict."""
+        for model_type in ("gemma", "gemma3"):
+            n_layer, n_embd, n_head, n_kv_heads, head_dim = 2, 32, 4, 2, 8
+            vocab_size, intermediate_size = 64, 64
+            hf_sd = self._make_gemma_hf_sd(model_type=model_type, n_layer=n_layer,
+                                             n_embd=n_embd, n_head=n_head,
+                                             n_kv_heads=n_kv_heads, head_dim=head_dim,
+                                             vocab_size=vocab_size,
+                                             intermediate_size=intermediate_size)
+            hf_cfg = self._make_gemma_hf_config(model_type=model_type, n_layer=n_layer,
+                                                  hidden_size=n_embd,
+                                                  num_attention_heads=n_head,
+                                                  num_key_value_heads=n_kv_heads,
+                                                  head_dim=head_dim,
+                                                  vocab_size=vocab_size,
+                                                  intermediate_size=intermediate_size)
+            layers_config = Mapper.from_hf_config(hf_cfg)
+            model = NeuralNetworkModel("tmp",
+                        Mapper(layers_config, {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
+            mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
+            self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()),
+                             f"Key mismatch for {model_type}")
+
+    @patch("neural_net_model.NeuralNetworkModel.serialize")
+    @patch("neural_net_model.AutoModelForCausalLM")
+    @patch("neural_net_model.AutoConfig")
+    def test_from_huggingface_gemma_returns_model(self, MockConfig, MockModel, mock_serialize):
+        n_layer, n_embd, n_head, n_kv_heads, head_dim = 1, 32, 4, 2, 8
+        vocab_size, intermediate_size = 64, 64
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma3", n_layer=n_layer,
+                                              hidden_size=n_embd, num_attention_heads=n_head,
+                                              num_key_value_heads=n_kv_heads, head_dim=head_dim,
+                                              vocab_size=vocab_size,
+                                              intermediate_size=intermediate_size)
+        MockConfig.from_pretrained.return_value = hf_cfg
+        MockModel.from_pretrained.return_value = self._make_hf_model_mock(
+            self._make_gemma_hf_sd(model_type="gemma3", n_layer=n_layer,
+                                    n_embd=n_embd, n_head=n_head,
+                                    n_kv_heads=n_kv_heads, head_dim=head_dim,
+                                    vocab_size=vocab_size,
+                                    intermediate_size=intermediate_size))
+
+        model = NeuralNetworkModel.from_huggingface("my-gemma", "google/gemma-3-1b")
+
+        self.assertIsInstance(model, NeuralNetworkModel)
+        self.assertEqual(model.model_id, "my-gemma")
+        self.assertEqual(model.status["code"], "Imported")
+        self.assertIn("google/gemma-3-1b", model.status["message"])
+        mock_serialize.assert_called_once()
+
+
     @patch('neural_net_model.dist.destroy_process_group')
     @patch('neural_net_model.dist.init_process_group')
     @patch('ddp.reconfig_logging')
