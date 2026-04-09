@@ -171,11 +171,8 @@ class NeuralNetworkModel(nn.Module):
         ``NeuralNetworkModel`` with matching architecture, maps the weights,
         serializes to disk/SHM, and returns the ready-to-use model.
 
-        Supports GPT-2 family models and Gemma family models.
-
         :param model_id: Internal model id used for serialization.
-        :param hf_repo_id: HuggingFace repo id, e.g. ``"gpt2"`` or
-            ``"google/gemma-3-1b"``.
+        :param hf_repo_id: HuggingFace repo id.
         :param revision: Optional HuggingFace revision / branch / tag.
         :param device: PyTorch device string (default ``"cpu"``).
         :return: Loaded ``NeuralNetworkModel`` instance.
