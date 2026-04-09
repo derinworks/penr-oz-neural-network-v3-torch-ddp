@@ -275,6 +275,22 @@ class TestMapper(unittest.TestCase):
             self.assertIn("post_attn_norm", tb, f"Missing post_attn_norm for {model_type}")
             self.assertIn("post_mlp_norm", tb, f"Missing post_mlp_norm for {model_type}")
 
+    def test_from_hf_config_gemma2_post_norm_on_branch(self):
+        """Gemma 2 sets post_norm_on_residual=False (norm on branch before add)."""
+        cfg = self._make_gemma_config(model_type="gemma2", n_layer=1)
+        layers = Mapper.from_hf_config(cfg)
+        tb = layers[1]["transformerblock"]
+        self.assertIn("post_attn_norm", tb)
+        self.assertFalse(tb["post_norm_on_residual"])
+
+    def test_from_hf_config_gemma3_post_norm_on_residual(self):
+        """Gemma 3+ sets post_norm_on_residual=True (norm after residual add)."""
+        for model_type in ("gemma3", "gemma3_text", "gemma4"):
+            cfg = self._make_gemma_config(model_type=model_type, n_layer=1)
+            layers = Mapper.from_hf_config(cfg)
+            tb = layers[1]["transformerblock"]
+            self.assertTrue(tb["post_norm_on_residual"], f"Expected True for {model_type}")
+
     def test_from_hf_config_gemma1_no_post_norms(self):
         """Gemma 1 does not have post-norms."""
         cfg = self._make_gemma_config(model_type="gemma", n_layer=1)
@@ -284,15 +300,16 @@ class TestMapper(unittest.TestCase):
         self.assertNotIn("post_mlp_norm", tb)
 
     def test_from_hf_config_gemma_attention_params(self):
-        """Attention layer carries GQA and RoPE parameters."""
+        """Attention layer carries GQA, RoPE, and head_dim parameters."""
         cfg = self._make_gemma_config(num_attention_heads=8, num_key_value_heads=4,
-                                       rope_theta=1e6, attention_dropout=0.1)
+                                       head_dim=16, rope_theta=1e6, attention_dropout=0.1)
         layers = Mapper.from_hf_config(cfg)
         attn_cfg = layers[1]["transformerblock"]["attn_block"]["sequential"][2]["attention"]
         self.assertEqual(attn_cfg["num_heads"], 8)
         self.assertEqual(attn_cfg["num_kv_heads"], 4)
         self.assertAlmostEqual(attn_cfg["rope_theta"], 1e6)
         self.assertAlmostEqual(attn_cfg["dropout"], 0.1)
+        self.assertEqual(attn_cfg["head_dim"], 16)
 
     def test_from_hf_config_gemma_qkv_dim(self):
         """QKV linear out_features matches n_head*head_dim + 2*n_kv_heads*head_dim."""

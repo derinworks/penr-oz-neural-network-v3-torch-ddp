@@ -6,7 +6,8 @@ import torch.nn.functional as nnf
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, num_heads: int, dropout: float=0.0,
-                 num_kv_heads: int=None, rope_theta: float=None):
+                 num_kv_heads: int=None, rope_theta: float=None,
+                 head_dim: int=None):
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
@@ -14,6 +15,11 @@ class CausalSelfAttention(nn.Module):
         self.rope_theta = rope_theta
         self._kv_cache = None
         self._layer_idx = 0
+        if rope_theta is not None and head_dim is not None:
+            inv_freq = 1.0 / (rope_theta ** (
+                torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim
+            ))
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def set_kv_cache(self, kv_cache, layer_idx: int):
         """Attach a KVCache for incremental decoding.
@@ -35,11 +41,14 @@ class CausalSelfAttention(nn.Module):
         seq_len = q.shape[2]
         device = q.device
         dtype = q.dtype
-        inv_freq = 1.0 / (self.rope_theta ** (
-            torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim
-        ))
+        if hasattr(self, "inv_freq"):
+            inv_freq = self.inv_freq
+        else:
+            inv_freq = 1.0 / (self.rope_theta ** (
+                torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim
+            ))
         t = torch.arange(offset, offset + seq_len, device=device, dtype=torch.float32)
-        freqs = torch.outer(t, inv_freq)
+        freqs = torch.outer(t, inv_freq.to(device))
         emb = torch.cat([freqs, freqs], dim=-1)
         cos = emb.cos().unsqueeze(0).unsqueeze(0).to(dtype)
         sin = emb.sin().unsqueeze(0).unsqueeze(0).to(dtype)
@@ -177,20 +186,40 @@ class ScaledEmbedding(nn.Embedding):
 
 
 class TransformerBlock(nn.Module):
-    """Transformer decoder block with optional post-normalization."""
+    """Transformer decoder block with optional post-normalization.
+
+    When *post_norm_on_residual* is ``True`` (default, Gemma 3+ pattern),
+    post-norms are applied **after** the residual addition::
+
+        h = post_attn_norm(x + attn_block(x))
+
+    When ``False`` (Gemma 2 pattern), post-norms wrap only the branch
+    output **before** it is added to the residual::
+
+        h = x + post_attn_norm(attn_block(x))
+    """
     def __init__(self, attn_block: nn.Module, mlp_block: nn.Module,
-                 post_attn_norm: nn.Module = None, post_mlp_norm: nn.Module = None):
+                 post_attn_norm: nn.Module = None, post_mlp_norm: nn.Module = None,
+                 post_norm_on_residual: bool = True):
         super().__init__()
         self.attn_block = attn_block
         self.mlp_block = mlp_block
         self.post_attn_norm = post_attn_norm
         self.post_mlp_norm = post_mlp_norm
+        self.post_norm_on_residual = post_norm_on_residual
 
     def forward(self, x: Tensor) -> Tensor:
-        h = x + self.attn_block(x)
-        if self.post_attn_norm is not None:
+        attn_out = self.attn_block(x)
+        if self.post_attn_norm is not None and not self.post_norm_on_residual:
+            attn_out = self.post_attn_norm(attn_out)
+        h = x + attn_out
+        if self.post_attn_norm is not None and self.post_norm_on_residual:
             h = self.post_attn_norm(h)
-        out = h + self.mlp_block(h)
-        if self.post_mlp_norm is not None:
+
+        mlp_out = self.mlp_block(h)
+        if self.post_mlp_norm is not None and not self.post_norm_on_residual:
+            mlp_out = self.post_mlp_norm(mlp_out)
+        out = h + mlp_out
+        if self.post_mlp_norm is not None and self.post_norm_on_residual:
             out = self.post_mlp_norm(out)
         return out

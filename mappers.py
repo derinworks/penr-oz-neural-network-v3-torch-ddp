@@ -181,6 +181,9 @@ class Mapper:
         activation = (getattr(hf_config, "hidden_activation", None)
                       or getattr(hf_config, "hidden_act", "gelu_pytorch_tanh"))
         has_post_norms = model_type != "gemma"
+        # Gemma 2 applies post-norm to branch output before residual add;
+        # Gemma 3+ applies post-norm after residual add.
+        post_norm_on_residual = model_type != "gemma2"
 
         qkv_dim = n_head * head_dim + 2 * n_kv_heads * head_dim
         attn_out_dim = n_head * head_dim
@@ -199,7 +202,8 @@ class Mapper:
                     {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
                     {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
                     {"attention": {"num_heads": n_head, "num_kv_heads": n_kv_heads,
-                                   "dropout": attn_dropout, "rope_theta": rope_theta}},
+                                   "dropout": attn_dropout, "rope_theta": rope_theta,
+                                   "head_dim": head_dim}},
                     {"linear": {"in_features": attn_out_dim, "out_features": n_embd, "bias": False}},
                 ]},
                 "mlp_block": {"sequential": [
@@ -211,6 +215,7 @@ class Mapper:
             if has_post_norms:
                 block["post_attn_norm"] = {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}}
                 block["post_mlp_norm"] = {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}}
+                block["post_norm_on_residual"] = post_norm_on_residual
             layers.append({"transformerblock": block})
 
         layers.extend([
