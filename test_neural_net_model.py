@@ -989,7 +989,7 @@ class TestNeuralNetModel(unittest.TestCase):
 
         MockConfig.from_pretrained.assert_called_once_with("gpt2", revision="main")
         MockModel.from_pretrained.assert_called_once_with(
-            "gpt2", revision="main", torch_dtype=torch.float32, low_cpu_mem_usage=True
+            "gpt2", revision="main", dtype=torch.bfloat16, low_cpu_mem_usage=True
         )
 
 

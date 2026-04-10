@@ -193,12 +193,16 @@ class NeuralNetworkModel(nn.Module):
         hf_model = AutoModelForCausalLM.from_pretrained(
             hf_repo_id,
             revision=revision,
-            torch_dtype=torch.float32,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
 
-        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_model.state_dict(), n_layer, hf_config)
+        hf_sd = hf_model.state_dict()
+        del hf_model
+        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_config)
+        del hf_sd
         model.load_state_dict(mapped_sd, strict=True)
+        del mapped_sd
         log.info(f"Loaded HuggingFace weights into model {model_id}")
 
         model.status = {
