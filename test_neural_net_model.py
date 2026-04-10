@@ -881,7 +881,7 @@ class TestNeuralNetModel(unittest.TestCase):
 
     def _make_hf_config(self, n_layer=1, n_embd=32, n_head=2,
                         vocab_size=64, n_positions=16):
-        cfg = MagicMock()
+        cfg = MagicMock(spec=[])
         cfg.vocab_size = vocab_size
         cfg.n_embd = n_embd
         cfg.n_head = n_head

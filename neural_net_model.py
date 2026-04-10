@@ -179,7 +179,8 @@ class NeuralNetworkModel(nn.Module):
         """
         log.info(f"Fetching HuggingFace config for {hf_repo_id} (revision={revision})")
         hf_config = AutoConfig.from_pretrained(hf_repo_id, revision=revision)
-        n_layer = getattr(hf_config, "n_layer", None) or getattr(hf_config, "num_hidden_layers", None)
+        text_config = getattr(hf_config, "text_config", hf_config)
+        n_layer = getattr(text_config, "n_layer", None) or getattr(text_config, "num_hidden_layers", None)
 
         layers_config = Mapper.from_hf_config(hf_config)
         optim_config = {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}}

@@ -69,7 +69,7 @@ class TestMapper(unittest.TestCase):
                            n_positions=32, vocab_size=128,
                            resid_pdrop=0.1, embd_pdrop=0.1, attn_pdrop=0.1,
                            activation_function="gelu_new"):
-        cfg = MagicMock()
+        cfg = MagicMock(spec=[])
         cfg.vocab_size = vocab_size
         cfg.n_embd = n_embd
         cfg.n_head = n_head
@@ -214,21 +214,34 @@ class TestMapper(unittest.TestCase):
                             head_dim=16, vocab_size=128, intermediate_size=128,
                             rms_norm_eps=1e-6, rope_theta=10000.0,
                             attention_dropout=0.0,
-                            hidden_activation="gelu_pytorch_tanh"):
-        cfg = MagicMock()
-        cfg.model_type = model_type
-        cfg.vocab_size = vocab_size
-        cfg.hidden_size = hidden_size
-        cfg.num_attention_heads = num_attention_heads
-        cfg.num_key_value_heads = num_key_value_heads
-        cfg.head_dim = head_dim
-        cfg.num_hidden_layers = n_layer
-        cfg.intermediate_size = intermediate_size
-        cfg.rms_norm_eps = rms_norm_eps
-        cfg.rope_theta = rope_theta
-        cfg.attention_dropout = attention_dropout
-        cfg.hidden_activation = hidden_activation
-        return cfg
+                            hidden_activation="gelu_pytorch_tanh",
+                            multimodal=False):
+        """Build a mock Gemma config.
+
+        When *multimodal* is True, text attributes are placed on a nested
+        ``text_config`` sub-object (mimics Gemma 3/4 multimodal configs).
+        """
+        text = MagicMock(spec=[])
+        text.vocab_size = vocab_size
+        text.hidden_size = hidden_size
+        text.num_attention_heads = num_attention_heads
+        text.num_key_value_heads = num_key_value_heads
+        text.head_dim = head_dim
+        text.num_hidden_layers = n_layer
+        text.intermediate_size = intermediate_size
+        text.rms_norm_eps = rms_norm_eps
+        text.rope_theta = rope_theta
+        text.attention_dropout = attention_dropout
+        text.hidden_activation = hidden_activation
+
+        if multimodal:
+            cfg = MagicMock(spec=[])
+            cfg.model_type = model_type
+            cfg.text_config = text
+            return cfg
+        # Flat config (gemma, gemma2): attributes directly on config
+        text.model_type = model_type
+        return text
 
     def test_from_hf_config_gemma_layer_count(self):
         """Gemma: 1 embedding + n_layer blocks + 3 final."""
@@ -347,6 +360,30 @@ class TestMapper(unittest.TestCase):
         self.assertIsInstance(nn_layers[1], nnl.TransformerBlock)
         self.assertIsInstance(nn_layers[-1], nnl.SoftmaxOnLast)
 
+    def test_from_hf_config_gemma4_multimodal_config(self):
+        """Gemma 4 multimodal config nests text params in text_config."""
+        cfg = self._make_gemma_config(model_type="gemma4", n_layer=2,
+                                       hidden_size=64, vocab_size=128,
+                                       multimodal=True)
+        layers = Mapper.from_hf_config(cfg)
+        self.assertEqual(len(layers), 1 + 2 + 3)
+        self.assertIn("scaledembedding", layers[0])
+        self.assertEqual(layers[0]["scaledembedding"]["num_embeddings"], 128)
+        self.assertIn("transformerblock", layers[1])
+
+    def test_from_hf_config_gemma_rope_theta_from_rope_scaling(self):
+        """When rope_theta is absent, it is extracted from rope_scaling."""
+        cfg = self._make_gemma_config(model_type="gemma3", n_layer=1)
+        # Remove direct rope_theta, add rope_scaling instead
+        del cfg.rope_theta
+        cfg.rope_scaling = {
+            "sliding_attention": {"rope_type": "default", "rope_theta": 50000.0},
+            "full_attention": {"rope_type": "proportional", "rope_theta": 1000000.0},
+        }
+        layers = Mapper.from_hf_config(cfg)
+        attn_cfg = layers[1]["transformerblock"]["attn_block"]["sequential"][2]["attention"]
+        self.assertAlmostEqual(attn_cfg["rope_theta"], 50000.0)
+
 
     def _make_hf_sd(self, n_layer=2, n_embd=32, n_head=2, vocab_size=64, block_size=16):
         """Build a fake HuggingFace GPT-2 state dict with the right shapes."""
@@ -434,7 +471,7 @@ class TestMapper(unittest.TestCase):
     def _make_gemma_hf_config(self, model_type="gemma3", n_layer=2, hidden_size=32,
                                num_attention_heads=4, num_key_value_heads=2, head_dim=8,
                                vocab_size=64, intermediate_size=64):
-        cfg = MagicMock()
+        cfg = MagicMock(spec=[])
         cfg.model_type = model_type
         cfg.vocab_size = vocab_size
         cfg.hidden_size = hidden_size

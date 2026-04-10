@@ -168,18 +168,26 @@ class Mapper:
     @classmethod
     def _build_gemma_layers(cls, hf_config) -> list[dict]:
         model_type = hf_config.model_type
-        vocab_size = hf_config.vocab_size
-        n_embd = hf_config.hidden_size
-        n_head = hf_config.num_attention_heads
-        n_kv_heads = getattr(hf_config, "num_key_value_heads", n_head)
-        head_dim = getattr(hf_config, "head_dim", n_embd // n_head)
-        n_layer = hf_config.num_hidden_layers
-        intermediate_size = getattr(hf_config, "intermediate_size", 4 * n_embd)
-        rms_norm_eps = getattr(hf_config, "rms_norm_eps", 1e-6)
-        rope_theta = getattr(hf_config, "rope_theta", 10000.0)
-        attn_dropout = getattr(hf_config, "attention_dropout", 0.0)
-        activation = (getattr(hf_config, "hidden_activation", None)
-                      or getattr(hf_config, "hidden_act", "gelu_pytorch_tanh"))
+        # Multimodal configs (gemma3, gemma4) nest text params in text_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        vocab_size = text_config.vocab_size
+        n_embd = text_config.hidden_size
+        n_head = text_config.num_attention_heads
+        n_kv_heads = getattr(text_config, "num_key_value_heads", n_head)
+        head_dim = getattr(text_config, "head_dim", n_embd // n_head)
+        n_layer = text_config.num_hidden_layers
+        intermediate_size = getattr(text_config, "intermediate_size", 4 * n_embd)
+        rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-6)
+        rope_theta = getattr(text_config, "rope_theta", None)
+        if rope_theta is None:
+            rope_scaling = getattr(text_config, "rope_scaling", None)
+            if isinstance(rope_scaling, dict) and "sliding_attention" in rope_scaling:
+                rope_theta = rope_scaling["sliding_attention"].get("rope_theta", 10000.0)
+            else:
+                rope_theta = 10000.0
+        attn_dropout = getattr(text_config, "attention_dropout", 0.0)
+        activation = (getattr(text_config, "hidden_activation", None)
+                      or getattr(text_config, "hidden_act", "gelu_pytorch_tanh"))
         has_post_norms = model_type != "gemma"
         # Gemma 2 applies post-norm to branch output before residual add;
         # Gemma 3+ applies post-norm after residual add.
