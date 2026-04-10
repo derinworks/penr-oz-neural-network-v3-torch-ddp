@@ -444,13 +444,15 @@ class TestMapper(unittest.TestCase):
 
     def _make_gemma_hf_sd(self, model_type="gemma3", n_layer=2, n_embd=32,
                            n_head=4, n_kv_heads=2, head_dim=8,
-                           vocab_size=64, intermediate_size=64):
+                           vocab_size=64, intermediate_size=64,
+                           multimodal=False):
         """Build a fake HuggingFace Gemma state dict."""
         sd = {}
-        sd["model.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
+        pfx = "model.language_model" if multimodal else "model"
+        sd[f"{pfx}.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
         has_post_norms = model_type != "gemma"
         for i in range(n_layer):
-            p = f"model.layers.{i}"
+            p = f"{pfx}.layers.{i}"
             sd[f"{p}.input_layernorm.weight"] = torch.zeros(n_embd)
             sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * head_dim, n_embd)
             sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
@@ -465,7 +467,7 @@ class TestMapper(unittest.TestCase):
             sd[f"{p}.mlp.gate_proj.weight"] = torch.zeros(intermediate_size, n_embd)
             sd[f"{p}.mlp.up_proj.weight"] = torch.zeros(intermediate_size, n_embd)
             sd[f"{p}.mlp.down_proj.weight"] = torch.zeros(n_embd, intermediate_size)
-        sd["model.norm.weight"] = torch.zeros(n_embd)
+        sd[f"{pfx}.norm.weight"] = torch.zeros(n_embd)
         return sd
 
     def _make_gemma_hf_config(self, model_type="gemma3", n_layer=2, hidden_size=32,
@@ -559,6 +561,30 @@ class TestMapper(unittest.TestCase):
             mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
             self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()),
                              f"Key mismatch for model_type={model_type}")
+
+    def test_gemma4_multimodal_state_dict_prefix(self):
+        """Gemma 4 multimodal state dict uses model.language_model. prefix."""
+        n_layer, n_embd, n_head, n_kv_heads, head_dim = 1, 32, 4, 2, 8
+        vocab_size, intermediate_size = 64, 64
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma4", n_layer=n_layer,
+                                         n_embd=n_embd, n_head=n_head,
+                                         n_kv_heads=n_kv_heads, head_dim=head_dim,
+                                         vocab_size=vocab_size,
+                                         intermediate_size=intermediate_size,
+                                         multimodal=True)
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma4", n_layer=n_layer,
+                                              hidden_size=n_embd,
+                                              num_attention_heads=n_head,
+                                              num_key_value_heads=n_kv_heads,
+                                              head_dim=head_dim,
+                                              vocab_size=vocab_size,
+                                              intermediate_size=intermediate_size)
+        from neural_net_model import NeuralNetworkModel
+        layers_config = Mapper.from_hf_config(hf_cfg)
+        model = NeuralNetworkModel("tmp", Mapper(layers_config,
+                                   {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
+        self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()))
 
 
 if __name__ == '__main__':

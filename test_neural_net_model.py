@@ -1016,12 +1016,14 @@ class TestNeuralNetModel(unittest.TestCase):
 
     def _make_gemma_hf_sd(self, model_type="gemma3", n_layer=1, n_embd=32,
                            n_head=4, n_kv_heads=2, head_dim=8,
-                           vocab_size=64, intermediate_size=64):
+                           vocab_size=64, intermediate_size=64,
+                           multimodal=False):
         sd = {}
-        sd["model.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
+        pfx = "model.language_model" if multimodal else "model"
+        sd[f"{pfx}.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
         has_post_norms = model_type != "gemma"
         for i in range(n_layer):
-            p = f"model.layers.{i}"
+            p = f"{pfx}.layers.{i}"
             sd[f"{p}.input_layernorm.weight"] = torch.zeros(n_embd)
             sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * head_dim, n_embd)
             sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
@@ -1036,7 +1038,7 @@ class TestNeuralNetModel(unittest.TestCase):
             sd[f"{p}.mlp.gate_proj.weight"] = torch.zeros(intermediate_size, n_embd)
             sd[f"{p}.mlp.up_proj.weight"] = torch.zeros(intermediate_size, n_embd)
             sd[f"{p}.mlp.down_proj.weight"] = torch.zeros(n_embd, intermediate_size)
-        sd["model.norm.weight"] = torch.zeros(n_embd)
+        sd[f"{pfx}.norm.weight"] = torch.zeros(n_embd)
         return sd
 
     def test_gemma_mapped_keys_match_model_state_dict(self):

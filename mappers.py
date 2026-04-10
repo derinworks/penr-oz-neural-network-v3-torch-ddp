@@ -305,12 +305,15 @@ class Mapper:
         model_type = hf_config.model_type
         has_post_norms = model_type != "gemma"
 
+        # Multimodal models (gemma3, gemma4) prefix text keys with "model.language_model."
+        pfx = "model.language_model" if "model.language_model.embed_tokens.weight" in hf_sd else "model"
+
         # Token embedding (layer 0 is ScaledEmbedding)
-        mapped["layers.0.weight"] = hf_sd["model.embed_tokens.weight"]
+        mapped["layers.0.weight"] = hf_sd[f"{pfx}.embed_tokens.weight"]
 
         for i in range(n_layer):
             block_idx = 1 + i  # 0=embedding, 1+=transformer blocks
-            hf = f"model.layers.{i}"
+            hf = f"{pfx}.layers.{i}"
 
             # Attention pre-norm (Gemma uses 1+weight centered RMSNorm; convert to standard)
             mapped[f"layers.{block_idx}.attn_block.0.weight"] = hf_sd[f"{hf}.input_layernorm.weight"] + 1
@@ -343,10 +346,10 @@ class Mapper:
 
         # Final RMSNorm
         ln_f_idx = 1 + n_layer
-        mapped[f"layers.{ln_f_idx}.weight"] = hf_sd["model.norm.weight"] + 1
+        mapped[f"layers.{ln_f_idx}.weight"] = hf_sd[f"{pfx}.norm.weight"] + 1
 
         # LM head – use explicit lm_head.weight when available, else tied embedding
-        lm_head_weight = hf_sd.get("lm_head.weight", hf_sd["model.embed_tokens.weight"])
+        lm_head_weight = hf_sd.get("lm_head.weight", hf_sd[f"{pfx}.embed_tokens.weight"])
         mapped[f"layers.{ln_f_idx + 1}.weight"] = lm_head_weight
 
         return mapped
