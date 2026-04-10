@@ -281,7 +281,7 @@ class TestMapper(unittest.TestCase):
 
     def test_from_hf_config_gemma3_has_post_norms(self):
         """Gemma 2+ variants include post-attention and post-MLP norms."""
-        for model_type in ("gemma2", "gemma3", "gemma3_text", "gemma4"):
+        for model_type in ("gemma2", "gemma3", "gemma3_text", "gemma4", "gemma4_text"):
             cfg = self._make_gemma_config(model_type=model_type, n_layer=1)
             layers = Mapper.from_hf_config(cfg)
             tb = layers[1]["transformerblock"]
@@ -298,7 +298,7 @@ class TestMapper(unittest.TestCase):
 
     def test_from_hf_config_gemma3_post_norm_on_residual(self):
         """Gemma 3+ sets post_norm_on_residual=True (norm after residual add)."""
-        for model_type in ("gemma3", "gemma3_text", "gemma4"):
+        for model_type in ("gemma3", "gemma3_text", "gemma4", "gemma4_text"):
             cfg = self._make_gemma_config(model_type=model_type, n_layer=1)
             layers = Mapper.from_hf_config(cfg)
             tb = layers[1]["transformerblock"]
@@ -521,6 +521,25 @@ class TestMapper(unittest.TestCase):
         self.assertTrue(torch.equal(mapped[f"layers.{lm_idx}.weight"],
                                     hf_sd["model.embed_tokens.weight"]))
 
+    def test_detect_hf_n_layer_flat_prefix(self):
+        """detect_hf_n_layer counts layers from model.layers.{i} keys."""
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma3", n_layer=3)
+        self.assertEqual(Mapper.detect_hf_n_layer(hf_sd), 3)
+
+    def test_detect_hf_n_layer_multimodal_prefix(self):
+        """detect_hf_n_layer counts layers from model.language_model.layers.{i} keys."""
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma4", n_layer=5, multimodal=True)
+        self.assertEqual(Mapper.detect_hf_n_layer(hf_sd), 5)
+
+    def test_detect_hf_n_layer_gpt2(self):
+        """detect_hf_n_layer counts layers from transformer.h.{i} keys."""
+        hf_sd = self._make_hf_sd(n_layer=4)
+        self.assertEqual(Mapper.detect_hf_n_layer(hf_sd), 4)
+
+    def test_detect_hf_n_layer_empty_sd(self):
+        """detect_hf_n_layer returns 0 for an empty state dict."""
+        self.assertEqual(Mapper.detect_hf_n_layer({}), 0)
+
     def test_gemma3_post_norms_mapped(self):
         """Gemma 2+ models map post-attention and post-feedforward norms."""
         hf_sd = self._make_gemma_hf_sd(model_type="gemma3", n_layer=1)
@@ -561,6 +580,52 @@ class TestMapper(unittest.TestCase):
             mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
             self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()),
                              f"Key mismatch for model_type={model_type}")
+
+    def test_from_hf_config_n_layer_override(self):
+        """n_layer_override causes from_hf_config to use the specified layer count."""
+        cfg = self._make_gemma_config(model_type="gemma3", n_layer=4)
+        layers = Mapper.from_hf_config(cfg, n_layer_override=2)
+        # 1 embedding + 2 override blocks + 3 final = 6
+        self.assertEqual(len(layers), 1 + 2 + 3)
+
+    def test_from_hf_config_gpt2_n_layer_override(self):
+        """n_layer_override works for GPT-2 configs too."""
+        cfg = self._make_gpt2_config(n_layer=6)
+        layers = Mapper.from_hf_config(cfg, n_layer_override=3)
+        # 2 base + 3 override blocks + 3 final = 8
+        self.assertEqual(len(layers), 2 + 3 + 3)
+
+    def test_gemma4_text_model_type_dispatches_to_gemma(self):
+        """gemma4_text model type dispatches to Gemma builder, not GPT-2."""
+        cfg = self._make_gemma_config(model_type="gemma4_text", n_layer=2)
+        layers = Mapper.from_hf_config(cfg)
+        # Gemma builder produces ScaledEmbedding as first layer
+        self.assertIn("scaledembedding", layers[0])
+        self.assertEqual(len(layers), 1 + 2 + 3)
+
+    def test_gemma4_text_state_dict_flat_prefix(self):
+        """gemma4_text uses flat model.layers.{i} prefix (no language_model)."""
+        n_layer, n_embd, n_head, n_kv_heads, head_dim = 1, 32, 4, 2, 8
+        vocab_size, intermediate_size = 64, 64
+        hf_sd = self._make_gemma_hf_sd(model_type="gemma4_text", n_layer=n_layer,
+                                         n_embd=n_embd, n_head=n_head,
+                                         n_kv_heads=n_kv_heads, head_dim=head_dim,
+                                         vocab_size=vocab_size,
+                                         intermediate_size=intermediate_size,
+                                         multimodal=False)
+        hf_cfg = self._make_gemma_hf_config(model_type="gemma4_text", n_layer=n_layer,
+                                              hidden_size=n_embd,
+                                              num_attention_heads=n_head,
+                                              num_key_value_heads=n_kv_heads,
+                                              head_dim=head_dim,
+                                              vocab_size=vocab_size,
+                                              intermediate_size=intermediate_size)
+        from neural_net_model import NeuralNetworkModel
+        layers_config = Mapper.from_hf_config(hf_cfg)
+        model = NeuralNetworkModel("tmp", Mapper(layers_config,
+                                   {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
+        self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()))
 
     def test_gemma4_multimodal_state_dict_prefix(self):
         """Gemma 4 multimodal state dict uses model.language_model. prefix."""

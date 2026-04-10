@@ -179,15 +179,6 @@ class NeuralNetworkModel(nn.Module):
         """
         log.info(f"Fetching HuggingFace config for {hf_repo_id} (revision={revision})")
         hf_config = AutoConfig.from_pretrained(hf_repo_id, revision=revision)
-        text_config = getattr(hf_config, "text_config", hf_config)
-        n_layer = getattr(text_config, "n_layer", None) or getattr(text_config, "num_hidden_layers", None)
-
-        layers_config = Mapper.from_hf_config(hf_config)
-        optim_config = {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}}
-        mapper = Mapper(layers_config, optim_config)
-
-        model = cls(model_id, mapper)
-        model.to(device)
 
         log.info(f"Downloading HuggingFace model weights for {hf_repo_id}")
         hf_model = AutoModelForCausalLM.from_pretrained(
@@ -196,9 +187,23 @@ class NeuralNetworkModel(nn.Module):
             dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
-
         hf_sd = hf_model.state_dict()
         del hf_model
+
+        # Detect actual layer count from state dict for robustness
+        n_layer = Mapper.detect_hf_n_layer(hf_sd)
+        if n_layer == 0:
+            text_config = getattr(hf_config, "text_config", hf_config)
+            n_layer = getattr(text_config, "n_layer", None) or getattr(text_config, "num_hidden_layers", None)
+        log.info(f"Detected {n_layer} transformer layers from HuggingFace state dict")
+
+        layers_config = Mapper.from_hf_config(hf_config, n_layer_override=n_layer)
+        optim_config = {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}}
+        mapper = Mapper(layers_config, optim_config)
+
+        model = cls(model_id, mapper)
+        model.to(device)
+
         mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_config)
         del hf_sd
         model.load_state_dict(mapped_sd, strict=True)

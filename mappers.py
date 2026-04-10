@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Iterable, Tuple
 import torch
 from torch import Tensor
@@ -6,9 +7,11 @@ import torch.optim as optim
 from torch.optim import Optimizer
 import neural_net_layers as nnl
 
+log = logging.getLogger(__name__)
+
 
 _GEMMA_MODEL_TYPES = frozenset({
-    'gemma', 'gemma2', 'gemma3', 'gemma3_text', 'gemma4',
+    'gemma', 'gemma2', 'gemma3', 'gemma3_text', 'gemma4', 'gemma4_text',
 })
 
 
@@ -97,21 +100,22 @@ class Mapper:
 
 
     @classmethod
-    def from_hf_config(cls, hf_config) -> list[dict]:
+    def from_hf_config(cls, hf_config, n_layer_override: int = None) -> list[dict]:
         """Build internal layers config list from a HuggingFace model config.
 
         Supports GPT-2 family and Gemma family configs.
 
         :param hf_config: A HuggingFace ``PretrainedConfig`` instance.
+        :param n_layer_override: Optional override for the number of transformer layers.
         :return: Layer config list compatible with ``Mapper.__init__`` ``layers`` argument.
         """
         model_type = getattr(hf_config, "model_type", None)
         if isinstance(model_type, str) and model_type in _GEMMA_MODEL_TYPES:
-            return cls._build_gemma_layers(hf_config)
-        return cls._build_gpt2_layers(hf_config)
+            return cls._build_gemma_layers(hf_config, n_layer_override)
+        return cls._build_gpt2_layers(hf_config, n_layer_override)
 
     @classmethod
-    def _build_gpt2_layers(cls, hf_config) -> list[dict]:
+    def _build_gpt2_layers(cls, hf_config, n_layer_override: int = None) -> list[dict]:
         vocab_size = hf_config.vocab_size
         n_embd = getattr(hf_config, "n_embd", None)
         if n_embd is None:
@@ -119,7 +123,9 @@ class Mapper:
         n_head = getattr(hf_config, "n_head", None)
         if n_head is None:
             n_head = getattr(hf_config, "num_attention_heads", None)
-        n_layer = getattr(hf_config, "n_layer", None)
+        n_layer = n_layer_override
+        if n_layer is None:
+            n_layer = getattr(hf_config, "n_layer", None)
         if n_layer is None:
             n_layer = getattr(hf_config, "num_hidden_layers", None)
         block_size = getattr(hf_config, "n_positions", None)
@@ -166,7 +172,7 @@ class Mapper:
         return layers
 
     @classmethod
-    def _build_gemma_layers(cls, hf_config) -> list[dict]:
+    def _build_gemma_layers(cls, hf_config, n_layer_override: int = None) -> list[dict]:
         model_type = hf_config.model_type
         # Multimodal configs (gemma3, gemma4) nest text params in text_config
         text_config = getattr(hf_config, "text_config", hf_config)
@@ -175,7 +181,7 @@ class Mapper:
         n_head = text_config.num_attention_heads
         n_kv_heads = getattr(text_config, "num_key_value_heads", n_head)
         head_dim = getattr(text_config, "head_dim", n_embd // n_head)
-        n_layer = text_config.num_hidden_layers
+        n_layer = n_layer_override if n_layer_override is not None else text_config.num_hidden_layers
         intermediate_size = getattr(text_config, "intermediate_size", 4 * n_embd)
         rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-6)
         rope_theta = getattr(text_config, "rope_theta", None)
@@ -246,6 +252,34 @@ class Mapper:
         else:
             raise ValueError(f"Unsupported optimizer: {self.optimizer}")
 
+    @staticmethod
+    def detect_hf_n_layer(hf_sd: dict) -> int:
+        """Detect the number of transformer layers in a HuggingFace state dict.
+
+        Supports Gemma (``model.layers.{i}`` or ``model.language_model.layers.{i}``)
+        and GPT-2 (``transformer.h.{i}``) key patterns.
+
+        :param hf_sd: State dict from a HuggingFace model.
+        :return: Number of transformer layers found, or 0 if unrecognised.
+        """
+        # Gemma patterns
+        pfx = "model.language_model" if "model.language_model.embed_tokens.weight" in hf_sd else "model"
+        layer_idx_pos = 3 if pfx == "model.language_model" else 2
+        layer_indices = [
+            int(k.split(".")[layer_idx_pos]) for k in hf_sd
+            if k.startswith(f"{pfx}.layers.") and k.endswith(".self_attn.q_proj.weight")
+        ]
+        if layer_indices:
+            return max(layer_indices) + 1
+        # GPT-2 pattern
+        gpt2_indices = [
+            int(k.split(".")[2]) for k in hf_sd
+            if k.startswith("transformer.h.") and k.endswith(".attn.c_attn.weight")
+        ]
+        if gpt2_indices:
+            return max(gpt2_indices) + 1
+        return 0
+
     @classmethod
     def map_hf_state_dict_to_custom(cls, hf_sd: dict, n_layer: int, hf_config=None) -> dict:
         """Map a HuggingFace state dict to the internal custom key names.
@@ -307,6 +341,13 @@ class Mapper:
 
         # Multimodal models (gemma3, gemma4) prefix text keys with "model.language_model."
         pfx = "model.language_model" if "model.language_model.embed_tokens.weight" in hf_sd else "model"
+
+        # Detect actual text layer count from state dict for robustness
+        actual_n_layer = cls.detect_hf_n_layer(hf_sd)
+        if actual_n_layer != n_layer:
+            log.warning("HF state dict has %d text layers but config says %d; using detected count",
+                        actual_n_layer, n_layer)
+            n_layer = actual_n_layer
 
         # Token embedding (layer 0 is ScaledEmbedding)
         mapped["layers.0.weight"] = hf_sd[f"{pfx}.embed_tokens.weight"]
