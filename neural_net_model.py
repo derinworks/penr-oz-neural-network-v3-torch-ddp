@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 import ddp
 from kv_cache import KVCache, create_kv_cache
-from neural_net_layers import CausalSelfAttention, PositionEmbedding, SoftmaxOnLast
+from neural_net_layers import CausalSelfAttention, PositionEmbedding, SoftmaxOnLast, TransformerBlock
 from loaders import Loader
 from mappers import Mapper
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -82,11 +82,14 @@ class NeuralNetworkModel(nn.Module):
         """
         return sum([p.numel() for p in self.parameters()])
 
-    def to(self, device: str):
-        if ddp.is_ddp() and device == 'cuda':
-            device = f"{device}:{ddp.ddp_local_rank()}"
-            torch.cuda.set_device(device)
-        super().to(device)
+    def to(self, device: str = None, dtype: torch.dtype = None):
+        if device is not None:
+            if ddp.is_ddp() and device == 'cuda':
+                device = f"{device}:{ddp.ddp_local_rank()}"
+                torch.cuda.set_device(device)
+            super().to(device)
+        if dtype is not None:
+            super().to(dtype=dtype)
 
     @classmethod
     def get_model_path(cls, model_id):
@@ -110,7 +113,7 @@ class NeuralNetworkModel(nn.Module):
         model_in_shm_path = os.path.join(self.SHM_PATH, model_path)
         if ddp.master_proc():
             log.info(f"Caching model to {model_in_shm_path}...")
-        torch.save(model_data, model_in_shm_path)
+        torch.save(model_data, model_in_shm_path, pickle_protocol=5)
         if ddp.master_proc():
             log.info(f"Model cached successfully: {model_in_shm_path}")
         p = multiprocessing.Process(target=shutil.copyfile, args=(model_in_shm_path, model_path))
@@ -133,7 +136,7 @@ class NeuralNetworkModel(nn.Module):
 
             if ddp.master_proc():
                 log.info(f"Retrieving model from {model_in_shm_path}...")
-            data = torch.load(model_in_shm_path)
+            data = torch.load(model_in_shm_path, weights_only=False)
             if ddp.master_proc():
                 log.info(f"Loaded model {model_id} data")
             model = cls(model_id, Mapper(data["layers"], data["optim"]))
@@ -165,40 +168,51 @@ class NeuralNetworkModel(nn.Module):
         revision: Optional[str] = None,
         device: str = "cpu",
     ) -> "NeuralNetworkModel":
-        """Import a HuggingFace GPT-2 family model into the internal format.
+        """Import a HuggingFace model into the internal format.
 
         Downloads config and weights from HuggingFace Hub, builds a fresh
         ``NeuralNetworkModel`` with matching architecture, maps the weights,
         serializes to disk/SHM, and returns the ready-to-use model.
 
         :param model_id: Internal model id used for serialization.
-        :param hf_repo_id: HuggingFace repo id, e.g. ``"gpt2"`` or
-            ``"openai-community/gpt2-medium"``.
+        :param hf_repo_id: HuggingFace repo id.
         :param revision: Optional HuggingFace revision / branch / tag.
         :param device: PyTorch device string (default ``"cpu"``).
         :return: Loaded ``NeuralNetworkModel`` instance.
         """
         log.info(f"Fetching HuggingFace config for {hf_repo_id} (revision={revision})")
         hf_config = AutoConfig.from_pretrained(hf_repo_id, revision=revision)
-        n_layer = getattr(hf_config, "n_layer", None) or getattr(hf_config, "num_hidden_layers", None)
-
-        layers_config = Mapper.from_hf_config(hf_config)
-        optim_config = {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}}
-        mapper = Mapper(layers_config, optim_config)
-
-        model = cls(model_id, mapper)
-        model.to(device)
 
         log.info(f"Downloading HuggingFace model weights for {hf_repo_id}")
         hf_model = AutoModelForCausalLM.from_pretrained(
             hf_repo_id,
             revision=revision,
-            torch_dtype=torch.float32,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
+        hf_sd = hf_model.state_dict()
+        del hf_model
 
-        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_model.state_dict(), n_layer)
+        # Detect actual layer count from state dict for robustness
+        n_layer = Mapper.detect_hf_n_layer(hf_sd)
+        if n_layer == 0:
+            text_config = getattr(hf_config, "text_config", hf_config)
+            n_layer = getattr(text_config, "n_layer", None) or getattr(text_config, "num_hidden_layers", None)
+        log.info(f"Detected {n_layer} transformer layers from HuggingFace state dict")
+
+        layers_config = Mapper.from_hf_config(hf_config, n_layer_override=n_layer)
+        optim_config = {"adamw": {"lr": 6e-4, "betas": [0.9, 0.95], "eps": 1e-8}}
+        mapper = Mapper(layers_config, optim_config)
+
+        model = cls(model_id, mapper)
+        # Keep imported weights in bfloat16 to halve memory footprint
+        model.to(dtype=torch.bfloat16)
+        model.to(device)
+
+        mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_config)
+        del hf_sd
         model.load_state_dict(mapped_sd, strict=True)
+        del mapped_sd
         log.info(f"Loaded HuggingFace weights into model {model_id}")
 
         model.status = {
