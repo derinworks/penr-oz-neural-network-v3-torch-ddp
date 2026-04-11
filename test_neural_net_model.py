@@ -522,17 +522,26 @@ class TestNeuralNetModel(unittest.TestCase):
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("test")
 
-    def test_serialize_fallback_on_large_model(self):
-        """Serialize falls back to legacy format when zip-based save raises RuntimeError."""
+    def test_serialize_uses_legacy_format_for_large_model(self):
+        """Serialize uses legacy format when estimated param bytes >= 2 GB."""
         model = NeuralNetworkModel("test_large", Mapper(
             [{"linear": {"in_features": 3, "out_features": 3}}], {"sgd": {}}))
-        with patch("neural_net_model.torch.save", side_effect=[RuntimeError("zip fail"), None]) as mock_save:
-            model.serialize()
-            self.assertEqual(mock_save.call_count, 2)
-            # Second call should use legacy format
-            _, kwargs = mock_save.call_args
-            self.assertFalse(kwargs["_use_new_zipfile_serialization"])
+        with patch.object(model, "parameters", return_value=[torch.empty(1024 ** 3, dtype=torch.uint8)] * 3):
+            with patch("neural_net_model.torch.save") as mock_save:
+                model.serialize()
+                _, kwargs = mock_save.call_args
+                self.assertFalse(kwargs["_use_new_zipfile_serialization"])
         NeuralNetworkModel.delete("test_large")
+
+    def test_serialize_uses_zip_format_for_small_model(self):
+        """Serialize uses zip format when estimated param bytes < 2 GB."""
+        model = NeuralNetworkModel("test_small", Mapper(
+            [{"linear": {"in_features": 3, "out_features": 3}}], {"sgd": {}}))
+        with patch("neural_net_model.torch.save") as mock_save:
+            model.serialize()
+            _, kwargs = mock_save.call_args
+            self.assertTrue(kwargs["_use_new_zipfile_serialization"])
+        NeuralNetworkModel.delete("test_small")
 
     def test_invalid_delete(self):
         # No error raised for failing to delete
