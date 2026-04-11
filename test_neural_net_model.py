@@ -522,6 +522,18 @@ class TestNeuralNetModel(unittest.TestCase):
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("test")
 
+    def test_serialize_fallback_on_large_model(self):
+        """Serialize falls back to legacy format when zip-based save raises RuntimeError."""
+        model = NeuralNetworkModel("test_large", Mapper(
+            [{"linear": {"in_features": 3, "out_features": 3}}], {"sgd": {}}))
+        with patch("neural_net_model.torch.save", side_effect=[RuntimeError("zip fail"), None]) as mock_save:
+            model.serialize()
+            self.assertEqual(mock_save.call_count, 2)
+            # Second call should use legacy format
+            _, kwargs = mock_save.call_args
+            self.assertFalse(kwargs["_use_new_zipfile_serialization"])
+        NeuralNetworkModel.delete("test_large")
+
     def test_invalid_delete(self):
         # No error raised for failing to delete
         NeuralNetworkModel.delete("nonexistent")

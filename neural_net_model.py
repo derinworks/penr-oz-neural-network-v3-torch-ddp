@@ -110,7 +110,11 @@ class NeuralNetworkModel(nn.Module):
         model_in_shm_path = os.path.join(self.SHM_PATH, model_path)
         if ddp.master_proc():
             log.info(f"Caching model to {model_in_shm_path}...")
-        torch.save(model_data, model_in_shm_path)
+        try:
+            torch.save(model_data, model_in_shm_path)
+        except RuntimeError:
+            # Zip-based format fails for files >2 GB; fall back to legacy format
+            torch.save(model_data, model_in_shm_path, _use_new_zipfile_serialization=False)
         if ddp.master_proc():
             log.info(f"Model cached successfully: {model_in_shm_path}")
         p = multiprocessing.Process(target=shutil.copyfile, args=(model_in_shm_path, model_path))
