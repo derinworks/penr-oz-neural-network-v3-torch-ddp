@@ -111,8 +111,12 @@ class Mapper:
         """
         model_type = getattr(hf_config, "model_type", None)
         if isinstance(model_type, str) and model_type in _GEMMA_MODEL_TYPES:
-            return cls._build_gemma_layers(hf_config, n_layer_override)
-        return cls._build_gpt2_layers(hf_config, n_layer_override)
+            layers = cls._build_gemma_layers(hf_config, n_layer_override)
+        else:
+            layers = cls._build_gpt2_layers(hf_config, n_layer_override)
+        log.info("Following %d layers have been built from HuggingFace config of model %s: %s",
+                 len(layers), model_type, layers)
+        return layers
 
     @classmethod
     def _build_gpt2_layers(cls, hf_config, n_layer_override: int = None) -> list[dict]:
