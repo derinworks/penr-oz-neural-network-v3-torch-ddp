@@ -445,8 +445,13 @@ class TestMapper(unittest.TestCase):
     def _make_gemma_hf_sd(self, model_type="gemma3", n_layer=2, n_embd=32,
                            n_head=4, n_kv_heads=2, head_dim=8,
                            vocab_size=64, intermediate_size=64,
-                           multimodal=False):
-        """Build a fake HuggingFace Gemma state dict."""
+                           multimodal=False, kv_shared_from=None):
+        """Build a fake HuggingFace Gemma state dict.
+
+        When *kv_shared_from* is set, layers at index >= kv_shared_from will
+        NOT include ``k_proj`` and ``v_proj`` weights, simulating the
+        KV-shared layer checkpoint format used by Gemma 4.
+        """
         sd = {}
         pfx = "model.language_model" if multimodal else "model"
         sd[f"{pfx}.embed_tokens.weight"] = torch.zeros(vocab_size, n_embd)
@@ -455,8 +460,10 @@ class TestMapper(unittest.TestCase):
             p = f"{pfx}.layers.{i}"
             sd[f"{p}.input_layernorm.weight"] = torch.zeros(n_embd)
             sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * head_dim, n_embd)
-            sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
-            sd[f"{p}.self_attn.v_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
+            is_kv_shared = kv_shared_from is not None and i >= kv_shared_from
+            if not is_kv_shared:
+                sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
+                sd[f"{p}.self_attn.v_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
             sd[f"{p}.self_attn.o_proj.weight"] = torch.zeros(n_embd, n_head * head_dim)
             if has_post_norms:
                 sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
@@ -626,6 +633,91 @@ class TestMapper(unittest.TestCase):
                                    {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
         mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
         self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()))
+
+    def test_gemma4_kv_shared_layers_copy_from_reference(self):
+        """KV-shared layers use reference layer k/v when own k_proj/v_proj are absent."""
+        # E2B-like: 10 layers, 4 shared, layer_types pattern s,s,s,f,s,s repeating
+        n_layer = 10
+        n_embd, n_head, n_kv_heads, head_dim = 32, 4, 2, 8
+        vocab_size, intermediate_size = 64, 64
+        num_kv_shared = 4
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"] + ["sliding_attention"]) * 2
+        first_kv_shared = n_layer - num_kv_shared  # 6
+
+        # State dict with shared layers missing k_proj/v_proj
+        hf_sd = self._make_gemma_hf_sd(
+            model_type="gemma4", n_layer=n_layer, n_embd=n_embd,
+            n_head=n_head, n_kv_heads=n_kv_heads, head_dim=head_dim,
+            vocab_size=vocab_size, intermediate_size=intermediate_size,
+            multimodal=True, kv_shared_from=first_kv_shared)
+        # Set reference layers to recognizable values
+        ref_k = torch.ones(n_kv_heads * head_dim, n_embd) * 42.0
+        ref_v = torch.ones(n_kv_heads * head_dim, n_embd) * 99.0
+        # Layer 5 is the last non-shared sliding layer (reference for shared sliding)
+        hf_sd["model.language_model.layers.5.self_attn.k_proj.weight"] = ref_k.clone()
+        hf_sd["model.language_model.layers.5.self_attn.v_proj.weight"] = ref_v.clone()
+
+        # Config with kv sharing info
+        cfg = MagicMock(spec=[])
+        cfg.model_type = "gemma4"
+        text = MagicMock(spec=[])
+        text.num_kv_shared_layers = num_kv_shared
+        text.layer_types = layer_types
+        cfg.text_config = text
+
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, cfg)
+
+        # Layer 6 is first shared sliding → references layer 5
+        qkv_dim = n_head * head_dim + 2 * n_kv_heads * head_dim
+        qkv = mapped["layers.7.attn_block.1.weight"]  # block_idx = 1 + 6
+        self.assertEqual(qkv.shape[0], qkv_dim)
+        # k portion should be the reference value
+        k_start = n_head * head_dim
+        k_end = k_start + n_kv_heads * head_dim
+        self.assertTrue(torch.allclose(qkv[k_start:k_end], ref_k))
+        # v portion should be the reference value
+        self.assertTrue(torch.allclose(qkv[k_end:], ref_v))
+
+    def test_gemma4_kv_shared_layers_override_present_keys(self):
+        """KV-shared layers use reference layer k/v even when own keys are present."""
+        # Simulates from_pretrained filling shared-layer k/v with random init
+        n_layer = 10
+        n_embd, n_head, n_kv_heads, head_dim = 32, 4, 2, 8
+        vocab_size, intermediate_size = 64, 64
+        num_kv_shared = 4
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"] + ["sliding_attention"]) * 2
+        first_kv_shared = n_layer - num_kv_shared  # 6
+
+        # Build state dict WITH k_proj/v_proj for shared layers (random junk)
+        hf_sd = self._make_gemma_hf_sd(
+            model_type="gemma4", n_layer=n_layer, n_embd=n_embd,
+            n_head=n_head, n_kv_heads=n_kv_heads, head_dim=head_dim,
+            vocab_size=vocab_size, intermediate_size=intermediate_size,
+            multimodal=True, kv_shared_from=None)  # all keys present
+        # Set recognizable values on reference layer (layer 5, last non-shared sliding)
+        ref_k = torch.ones(n_kv_heads * head_dim, n_embd) * 42.0
+        ref_v = torch.ones(n_kv_heads * head_dim, n_embd) * 99.0
+        hf_sd["model.language_model.layers.5.self_attn.k_proj.weight"] = ref_k.clone()
+        hf_sd["model.language_model.layers.5.self_attn.v_proj.weight"] = ref_v.clone()
+        # Set shared layer 6 to different (wrong) values simulating random init
+        hf_sd["model.language_model.layers.6.self_attn.k_proj.weight"] = torch.randn(n_kv_heads * head_dim, n_embd)
+        hf_sd["model.language_model.layers.6.self_attn.v_proj.weight"] = torch.randn(n_kv_heads * head_dim, n_embd)
+
+        cfg = MagicMock(spec=[])
+        cfg.model_type = "gemma4"
+        text = MagicMock(spec=[])
+        text.num_kv_shared_layers = num_kv_shared
+        text.layer_types = layer_types
+        cfg.text_config = text
+
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, cfg)
+
+        # Layer 6 is first shared sliding → always gets reference layer 5's k/v
+        qkv = mapped["layers.7.attn_block.1.weight"]  # block_idx = 1 + 6
+        k_start = n_head * head_dim
+        k_end = k_start + n_kv_heads * head_dim
+        self.assertTrue(torch.allclose(qkv[k_start:k_end], ref_k))
+        self.assertTrue(torch.allclose(qkv[k_end:], ref_v))
 
     def test_gemma4_multimodal_state_dict_prefix(self):
         """Gemma 4 multimodal state dict uses model.language_model. prefix."""

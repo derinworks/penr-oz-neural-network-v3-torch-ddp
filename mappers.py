@@ -349,6 +349,26 @@ class Mapper:
                         actual_n_layer, n_layer)
             n_layer = actual_n_layer
 
+        # Build KV-shared layer reference mapping (Gemma 4 with shared KV layers).
+        # Shared layers reuse K/V projections from an earlier non-shared layer of
+        # the same attention type, so their k_proj/v_proj may be absent from the
+        # checkpoint.  We copy weights from the referenced layer when missing.
+        text_config = getattr(hf_config, "text_config", hf_config)
+        num_kv_shared = getattr(text_config, "num_kv_shared_layers", 0) or 0
+        kv_ref_layer = {}
+        if num_kv_shared > 0:
+            layer_types = getattr(text_config, "layer_types", None)
+            if layer_types and len(layer_types) >= n_layer:
+                first_kv_shared = n_layer - num_kv_shared
+                prev_layers = list(layer_types[:first_kv_shared])
+                for i in range(first_kv_shared, n_layer):
+                    lt = layer_types[i]
+                    try:
+                        ref = len(prev_layers) - 1 - prev_layers[::-1].index(lt)
+                        kv_ref_layer[i] = ref
+                    except ValueError:
+                        pass  # no matching non-shared layer found; use own weights
+
         # Token embedding (layer 0 is ScaledEmbedding)
         mapped["layers.0.weight"] = hf_sd[f"{pfx}.embed_tokens.weight"]
 
@@ -361,8 +381,19 @@ class Mapper:
 
             # QKV projection (concatenate separate Q, K, V into single tensor)
             q = hf_sd[f"{hf}.self_attn.q_proj.weight"]
-            k = hf_sd[f"{hf}.self_attn.k_proj.weight"]
-            v = hf_sd[f"{hf}.self_attn.v_proj.weight"]
+            ref = kv_ref_layer.get(i)
+            if ref is not None:
+                # KV-shared layer: always use the reference (non-shared) layer's
+                # K/V weights.  The checkpoint may omit them entirely, or
+                # from_pretrained may have filled them with random init values;
+                # either way, the reference layer holds the correct weights.
+                ref_hf = f"{pfx}.layers.{ref}"
+                k = hf_sd[f"{ref_hf}.self_attn.k_proj.weight"]
+                v = hf_sd[f"{ref_hf}.self_attn.v_proj.weight"]
+                log.debug("Layer %d: copied K/V from reference layer %d", i, ref)
+            else:
+                k = hf_sd[f"{hf}.self_attn.k_proj.weight"]
+                v = hf_sd[f"{hf}.self_attn.v_proj.weight"]
             mapped[f"layers.{block_idx}.attn_block.1.weight"] = torch.cat([q, k, v], dim=0)
 
             # Output projection
