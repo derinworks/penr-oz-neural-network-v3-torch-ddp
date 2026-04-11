@@ -199,8 +199,13 @@ class Mapper:
         # Gemma 3+ applies post-norm after residual add.
         post_norm_on_residual = model_type != "gemma2"
 
-        qkv_dim = n_head * head_dim + 2 * n_kv_heads * head_dim
-        attn_out_dim = n_head * head_dim
+        # Per-layer heterogeneous architecture (Gemma 4)
+        layer_types = getattr(text_config, "layer_types", None)
+        global_head_dim = getattr(text_config, "global_head_dim", head_dim)
+        n_global_kv_heads = getattr(text_config, "num_global_key_value_heads", None) or n_kv_heads
+        use_double_wide_mlp = getattr(text_config, "use_double_wide_mlp", False)
+        num_kv_shared = getattr(text_config, "num_kv_shared_layers", 0) or 0
+        first_kv_shared = n_layer - num_kv_shared if num_kv_shared > 0 else n_layer
 
         layers: list[dict] = [
             {"scaledembedding": {
@@ -210,19 +215,31 @@ class Mapper:
             }},
         ]
 
-        for _ in range(n_layer):
+        for i in range(n_layer):
+            # Determine per-layer attention dimensions
+            is_full_attn = (layer_types and i < len(layer_types)
+                            and layer_types[i] == "full_attention")
+            layer_head_dim = global_head_dim if is_full_attn else head_dim
+            layer_kv_heads = n_global_kv_heads if is_full_attn else n_kv_heads
+            qkv_dim = n_head * layer_head_dim + 2 * layer_kv_heads * layer_head_dim
+            attn_out_dim = n_head * layer_head_dim
+
+            # Determine per-layer MLP dimensions
+            is_kv_shared = i >= first_kv_shared
+            layer_intermediate = intermediate_size * 2 if (use_double_wide_mlp and is_kv_shared) else intermediate_size
+
             block: dict = {
                 "attn_block": {"sequential": [
                     {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
                     {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
-                    {"attention": {"num_heads": n_head, "num_kv_heads": n_kv_heads,
+                    {"attention": {"num_heads": n_head, "num_kv_heads": layer_kv_heads,
                                    "dropout": attn_dropout, "rope_theta": rope_theta,
-                                   "head_dim": head_dim}},
+                                   "head_dim": layer_head_dim}},
                     {"linear": {"in_features": attn_out_dim, "out_features": n_embd, "bias": False}},
                 ]},
                 "mlp_block": {"sequential": [
                     {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
-                    {"gatedmlp": {"in_features": n_embd, "intermediate_size": intermediate_size,
+                    {"gatedmlp": {"in_features": n_embd, "intermediate_size": layer_intermediate,
                                   "bias": False, "activation": activation}},
                 ]},
             }

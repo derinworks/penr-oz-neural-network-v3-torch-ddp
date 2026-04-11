@@ -445,12 +445,20 @@ class TestMapper(unittest.TestCase):
     def _make_gemma_hf_sd(self, model_type="gemma3", n_layer=2, n_embd=32,
                            n_head=4, n_kv_heads=2, head_dim=8,
                            vocab_size=64, intermediate_size=64,
-                           multimodal=False, kv_shared_from=None):
+                           multimodal=False, kv_shared_from=None,
+                           layer_types=None, global_head_dim=None,
+                           n_global_kv_heads=None, use_double_wide_mlp=False):
         """Build a fake HuggingFace Gemma state dict.
 
         When *kv_shared_from* is set, layers at index >= kv_shared_from will
         NOT include ``k_proj`` and ``v_proj`` weights, simulating the
         KV-shared layer checkpoint format used by Gemma 4.
+
+        When *layer_types* includes ``"full_attention"`` entries, those layers
+        use *global_head_dim* and *n_global_kv_heads* for attention dimensions.
+
+        When *use_double_wide_mlp* is True, KV-shared layers use
+        ``intermediate_size * 2``.
         """
         sd = {}
         pfx = "model.language_model" if multimodal else "model"
@@ -458,28 +466,38 @@ class TestMapper(unittest.TestCase):
         has_post_norms = model_type != "gemma"
         for i in range(n_layer):
             p = f"{pfx}.layers.{i}"
+            is_full = (layer_types and i < len(layer_types)
+                       and layer_types[i] == "full_attention")
+            lhd = (global_head_dim or head_dim) if is_full else head_dim
+            lkv = (n_global_kv_heads or n_kv_heads) if is_full else n_kv_heads
+            is_shared = kv_shared_from is not None and i >= kv_shared_from
+            l_inter = intermediate_size * 2 if (use_double_wide_mlp and is_shared) else intermediate_size
+
             sd[f"{p}.input_layernorm.weight"] = torch.zeros(n_embd)
-            sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * head_dim, n_embd)
-            is_kv_shared = kv_shared_from is not None and i >= kv_shared_from
-            if not is_kv_shared:
-                sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
-                sd[f"{p}.self_attn.v_proj.weight"] = torch.zeros(n_kv_heads * head_dim, n_embd)
-            sd[f"{p}.self_attn.o_proj.weight"] = torch.zeros(n_embd, n_head * head_dim)
+            sd[f"{p}.self_attn.q_proj.weight"] = torch.zeros(n_head * lhd, n_embd)
+            if not is_shared:
+                sd[f"{p}.self_attn.k_proj.weight"] = torch.zeros(lkv * lhd, n_embd)
+                sd[f"{p}.self_attn.v_proj.weight"] = torch.zeros(lkv * lhd, n_embd)
+            sd[f"{p}.self_attn.o_proj.weight"] = torch.zeros(n_embd, n_head * lhd)
             if has_post_norms:
                 sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
                 sd[f"{p}.pre_feedforward_layernorm.weight"] = torch.zeros(n_embd)
                 sd[f"{p}.post_feedforward_layernorm.weight"] = torch.zeros(n_embd)
             else:
                 sd[f"{p}.post_attention_layernorm.weight"] = torch.zeros(n_embd)
-            sd[f"{p}.mlp.gate_proj.weight"] = torch.zeros(intermediate_size, n_embd)
-            sd[f"{p}.mlp.up_proj.weight"] = torch.zeros(intermediate_size, n_embd)
-            sd[f"{p}.mlp.down_proj.weight"] = torch.zeros(n_embd, intermediate_size)
+            sd[f"{p}.mlp.gate_proj.weight"] = torch.zeros(l_inter, n_embd)
+            sd[f"{p}.mlp.up_proj.weight"] = torch.zeros(l_inter, n_embd)
+            sd[f"{p}.mlp.down_proj.weight"] = torch.zeros(n_embd, l_inter)
         sd[f"{pfx}.norm.weight"] = torch.zeros(n_embd)
         return sd
 
     def _make_gemma_hf_config(self, model_type="gemma3", n_layer=2, hidden_size=32,
                                num_attention_heads=4, num_key_value_heads=2, head_dim=8,
-                               vocab_size=64, intermediate_size=64):
+                               vocab_size=64, intermediate_size=64,
+                               layer_types=None, global_head_dim=None,
+                               num_global_key_value_heads=None,
+                               use_double_wide_mlp=False,
+                               num_kv_shared_layers=0):
         cfg = MagicMock(spec=[])
         cfg.model_type = model_type
         cfg.vocab_size = vocab_size
@@ -493,6 +511,11 @@ class TestMapper(unittest.TestCase):
         cfg.rope_theta = 10000.0
         cfg.attention_dropout = 0.0
         cfg.hidden_activation = "gelu_pytorch_tanh"
+        cfg.layer_types = layer_types
+        cfg.global_head_dim = global_head_dim if global_head_dim is not None else head_dim
+        cfg.num_global_key_value_heads = num_global_key_value_heads
+        cfg.use_double_wide_mlp = use_double_wide_mlp
+        cfg.num_kv_shared_layers = num_kv_shared_layers
         return cfg
 
     def test_gemma_qkv_weights_are_concatenated(self):
@@ -718,6 +741,50 @@ class TestMapper(unittest.TestCase):
         k_end = k_start + n_kv_heads * head_dim
         self.assertTrue(torch.allclose(qkv[k_start:k_end], ref_k))
         self.assertTrue(torch.allclose(qkv[k_end:], ref_v))
+
+    def test_gemma4_heterogeneous_layers_e2b_like(self):
+        """E2B-like model: full attn uses global_head_dim, shared layers use double-wide MLP."""
+        n_layer = 10
+        n_embd, n_head, n_kv_heads = 32, 4, 2
+        head_dim, global_head_dim = 8, 16
+        vocab_size, intermediate_size = 64, 64
+        num_kv_shared = 4
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"] + ["sliding_attention"]) * 2
+
+        hf_sd = self._make_gemma_hf_sd(
+            model_type="gemma4", n_layer=n_layer, n_embd=n_embd,
+            n_head=n_head, n_kv_heads=n_kv_heads, head_dim=head_dim,
+            vocab_size=vocab_size, intermediate_size=intermediate_size,
+            multimodal=True, kv_shared_from=n_layer - num_kv_shared,
+            layer_types=layer_types, global_head_dim=global_head_dim,
+            use_double_wide_mlp=True)
+        hf_cfg = self._make_gemma_hf_config(
+            model_type="gemma4", n_layer=n_layer, hidden_size=n_embd,
+            num_attention_heads=n_head, num_key_value_heads=n_kv_heads,
+            head_dim=head_dim, vocab_size=vocab_size,
+            intermediate_size=intermediate_size, layer_types=layer_types,
+            global_head_dim=global_head_dim, use_double_wide_mlp=True,
+            num_kv_shared_layers=num_kv_shared)
+
+        from neural_net_model import NeuralNetworkModel
+        layers_config = Mapper.from_hf_config(hf_cfg)
+        model = NeuralNetworkModel("tmp", Mapper(layers_config,
+                                   {"adamw": {"lr": 1e-4, "betas": [0.9, 0.95], "eps": 1e-8}}))
+        mapped = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_cfg)
+        self.assertEqual(set(mapped.keys()), set(model.state_dict().keys()))
+
+        # Verify sliding layer dimensions (layer 0)
+        sliding_qkv = n_head * head_dim + 2 * n_kv_heads * head_dim
+        self.assertEqual(mapped["layers.1.attn_block.1.weight"].shape[0], sliding_qkv)
+        self.assertEqual(mapped["layers.1.mlp_block.1.gate_proj.weight"].shape[0], intermediate_size)
+
+        # Verify full attention layer dimensions (layer 3)
+        full_qkv = n_head * global_head_dim + 2 * n_kv_heads * global_head_dim
+        self.assertEqual(mapped["layers.4.attn_block.1.weight"].shape[0], full_qkv)
+        self.assertEqual(mapped["layers.4.attn_block.3.weight"].shape[1], n_head * global_head_dim)
+
+        # Verify double-wide MLP on shared layer (layer 6, block_idx=7)
+        self.assertEqual(mapped["layers.7.mlp_block.1.gate_proj.weight"].shape[0], intermediate_size * 2)
 
     def test_gemma4_multimodal_state_dict_prefix(self):
         """Gemma 4 multimodal state dict uses model.language_model. prefix."""
