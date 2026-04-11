@@ -82,11 +82,14 @@ class NeuralNetworkModel(nn.Module):
         """
         return sum([p.numel() for p in self.parameters()])
 
-    def to(self, device: str):
-        if ddp.is_ddp() and device == 'cuda':
-            device = f"{device}:{ddp.ddp_local_rank()}"
-            torch.cuda.set_device(device)
-        super().to(device)
+    def to(self, device: str = None, dtype: torch.dtype = None):
+        if device is not None:
+            if ddp.is_ddp() and device == 'cuda':
+                device = f"{device}:{ddp.ddp_local_rank()}"
+                torch.cuda.set_device(device)
+            super().to(device)
+        if dtype is not None:
+            super().to(dtype=dtype)
 
     @classmethod
     def get_model_path(cls, model_id):
@@ -110,10 +113,7 @@ class NeuralNetworkModel(nn.Module):
         model_in_shm_path = os.path.join(self.SHM_PATH, model_path)
         if ddp.master_proc():
             log.info(f"Caching model to {model_in_shm_path}...")
-        # Estimate serialized size from parameter bytes; zip format fails above ~2 GB
-        param_bytes = sum(p.nelement() * p.element_size() for p in self.parameters())
-        use_zip = param_bytes < 2 * 1024 ** 3
-        torch.save(model_data, model_in_shm_path, _use_new_zipfile_serialization=use_zip)
+        torch.save(model_data, model_in_shm_path, pickle_protocol=5)
         if ddp.master_proc():
             log.info(f"Model cached successfully: {model_in_shm_path}")
         p = multiprocessing.Process(target=shutil.copyfile, args=(model_in_shm_path, model_path))
@@ -136,7 +136,7 @@ class NeuralNetworkModel(nn.Module):
 
             if ddp.master_proc():
                 log.info(f"Retrieving model from {model_in_shm_path}...")
-            data = torch.load(model_in_shm_path)
+            data = torch.load(model_in_shm_path, weights_only=False)
             if ddp.master_proc():
                 log.info(f"Loaded model {model_id} data")
             model = cls(model_id, Mapper(data["layers"], data["optim"]))
@@ -205,6 +205,8 @@ class NeuralNetworkModel(nn.Module):
         mapper = Mapper(layers_config, optim_config)
 
         model = cls(model_id, mapper)
+        # Keep imported weights in bfloat16 to halve memory footprint
+        model.to(dtype=torch.bfloat16)
         model.to(device)
 
         mapped_sd = Mapper.map_hf_state_dict_to_custom(hf_sd, n_layer, hf_config)

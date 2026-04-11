@@ -522,26 +522,15 @@ class TestNeuralNetModel(unittest.TestCase):
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("test")
 
-    def test_serialize_uses_legacy_format_for_large_model(self):
-        """Serialize uses legacy format when estimated param bytes >= 2 GB."""
-        model = NeuralNetworkModel("test_large", Mapper(
-            [{"linear": {"in_features": 3, "out_features": 3}}], {"sgd": {}}))
-        with patch.object(model, "parameters", return_value=[torch.empty(1024 ** 3, dtype=torch.uint8)] * 3):
-            with patch("neural_net_model.torch.save") as mock_save:
-                model.serialize()
-                _, kwargs = mock_save.call_args
-                self.assertFalse(kwargs["_use_new_zipfile_serialization"])
-        NeuralNetworkModel.delete("test_large")
-
-    def test_serialize_uses_zip_format_for_small_model(self):
-        """Serialize uses zip format when estimated param bytes < 2 GB."""
-        model = NeuralNetworkModel("test_small", Mapper(
+    def test_serialize_uses_pickle_protocol_5(self):
+        """Serialize uses pickle protocol 5 to support large models with compression."""
+        model = NeuralNetworkModel("test_pickle", Mapper(
             [{"linear": {"in_features": 3, "out_features": 3}}], {"sgd": {}}))
         with patch("neural_net_model.torch.save") as mock_save:
             model.serialize()
             _, kwargs = mock_save.call_args
-            self.assertTrue(kwargs["_use_new_zipfile_serialization"])
-        NeuralNetworkModel.delete("test_small")
+            self.assertEqual(kwargs["pickle_protocol"], 5)
+        NeuralNetworkModel.delete("test_pickle")
 
     def test_invalid_delete(self):
         # No error raised for failing to delete
@@ -978,6 +967,22 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertIsInstance(model, NeuralNetworkModel)
         self.assertEqual(model.model_id, "my-gpt2")
         mock_serialize.assert_called_once()
+
+    @patch("neural_net_model.NeuralNetworkModel.serialize")
+    @patch("neural_net_model.AutoModelForCausalLM")
+    @patch("neural_net_model.AutoConfig")
+    def test_from_huggingface_stores_weights_in_bfloat16(self, MockConfig, MockModel, mock_serialize):
+        n_layer, n_embd, vocab_size, block_size = 1, 32, 64, 16
+        hf_cfg = self._make_hf_config(n_layer=n_layer, n_embd=n_embd,
+                                       vocab_size=vocab_size, n_positions=block_size)
+        MockConfig.from_pretrained.return_value = hf_cfg
+        MockModel.from_pretrained.return_value = self._make_hf_model_mock(
+            self._make_hf_sd(n_layer, n_embd, vocab_size, block_size))
+
+        model = NeuralNetworkModel.from_huggingface("my-gpt2", "gpt2")
+
+        for p in model.parameters():
+            self.assertEqual(p.dtype, torch.bfloat16, f"Expected bfloat16 but got {p.dtype}")
 
     @patch("neural_net_model.NeuralNetworkModel.serialize")
     @patch("neural_net_model.AutoModelForCausalLM")
