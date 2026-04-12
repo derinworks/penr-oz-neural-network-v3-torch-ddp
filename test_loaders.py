@@ -19,10 +19,11 @@ class TestDownloader(unittest.TestCase):
         if os.path.exists(self.test_data_folder):
             shutil.rmtree(self.test_data_folder)
 
+    @patch('loaders.Tokenizer')
     @patch('loaders.multiprocessing.Pool')
     @patch('loaders.DATA_FOLDER')
     @patch('loaders.load_dataset')
-    def test_download(self, mock_load_dataset, mock_data_folder, mock_pool_class):
+    def test_download(self, mock_load_dataset, mock_data_folder, mock_pool_class, mock_tokenizer_class):
         mock_data_folder.__str__ = lambda self: self.test_data_folder
         
         # Mock dataset
@@ -43,9 +44,10 @@ class TestDownloader(unittest.TestCase):
             # Verify save was called
             self.assertTrue(mock_save.called)
 
+    @patch('loaders.Tokenizer')
     @patch('loaders.DATA_FOLDER', 'test_data')
     @patch('loaders.np.save')
-    def test_downloader_save(self, mock_np_save):
+    def test_downloader_save(self, mock_np_save, mock_tokenizer_class):
         downloader = Downloader("test_ds", shard_size=100, encoding="gpt2")
         
         # Call _save

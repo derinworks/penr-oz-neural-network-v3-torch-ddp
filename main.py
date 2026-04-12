@@ -103,7 +103,7 @@ class TokenizerRequest(BaseModel):
     encoding: str = Field(
         ...,
         examples=["gpt2"],
-        description="Tiktoken encoding to use"
+        description="HuggingFace model name for tokenizer"
     )
 
 class DownloadDatasetRequest(DatasetRequest, TokenizerRequest):
@@ -246,15 +246,15 @@ class DecodeTokensRequest(TokenizerRequest):
     tokens: list[int] = Field(
         ...,
         examples=[[0]],
-        description="Previously Tiktoken encoded or generated tokens"
+        description="Previously encoded or generated tokens"
     )
 
 class ImportModelRequest(BaseModel):
     hf_repo_id: str = Field(
         ...,
-        examples=["gpt2", "openai-community/gpt2-medium", "google/gemma-3-1b", "google/gemma-4-E2B"],
+        examples=["openai-community/gpt2", "openai-community/gpt2-medium", "google/gemma-3-1b", "google/gemma-4-E2B"],
         description="HuggingFace repo ID of the model to import. "
-                    "Supports GPT-2 family (e.g. gpt2, openai-community/gpt2-medium, openai-community/gpt2-large) "
+                    "Supports GPT-2 family (e.g. openai-community/gpt2, openai-community/gpt2-medium, openai-community/gpt2-large) "
                     "and Gemma family (e.g. google/gemma-3-1b, google/gemma-4-E2B). "
                     "Larger models like google/gemma-4-31B-it require significant memory; "
                     "use smaller variants for resource-constrained environments."
