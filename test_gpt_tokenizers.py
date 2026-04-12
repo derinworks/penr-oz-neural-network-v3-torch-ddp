@@ -57,7 +57,7 @@ class TestTokenizer(unittest.TestCase):
     @patch("gpt_tokenizers.AutoTokenizer")
     def test_tokenize_empty_string(self, mock_auto_tokenizer):
         mock_auto_tokenizer.from_pretrained.return_value = self._make_mock_enc()
-        tokenizer = Tokenizer("")
+        tokenizer = Tokenizer("gpt2")
         tokens = tokenizer.tokenize("")
 
         # Even empty string should have EOS token
