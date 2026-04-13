@@ -352,6 +352,87 @@ class TestNeuralNetModel(unittest.TestCase):
             # generation should have stopped after the stop_token
             self.assertEqual(stopped_tokens, input_context[0] + [first_generated])
 
+    def _make_gemma_like_layers(self, vocab_size=16, n_embd=8, n_head=2, n_kv_heads=2,
+                                head_dim=4, intermediate_size=16):
+        """Build a small Gemma-like layer config for testing."""
+        qkv_dim = n_head * head_dim + 2 * n_kv_heads * head_dim
+        return [
+            {"scaledembedding": {
+                "num_embeddings": vocab_size, "embedding_dim": n_embd,
+                "scale": float(n_embd ** 0.5),
+            }},
+            {"transformerblock": {
+                "attn_block": {"sequential": [
+                    {"rmsnorm": {"normalized_shape": n_embd}},
+                    {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
+                    {"attention": {"num_heads": n_head, "num_kv_heads": n_kv_heads,
+                                   "rope_theta": 10000.0, "head_dim": head_dim}},
+                    {"linear": {"in_features": n_head * head_dim, "out_features": n_embd, "bias": False}},
+                ]},
+                "mlp_block": {"sequential": [
+                    {"rmsnorm": {"normalized_shape": n_embd}},
+                    {"gatedmlp": {"in_features": n_embd, "intermediate_size": intermediate_size,
+                                  "bias": False, "activation": "gelu_pytorch_tanh"}},
+                ]},
+                "post_attn_norm": {"rmsnorm": {"normalized_shape": n_embd}},
+                "post_mlp_norm": {"rmsnorm": {"normalized_shape": n_embd}},
+                "post_norm_on_residual": True,
+            }},
+            {"rmsnorm": {"normalized_shape": n_embd}},
+            {"linear": {"in_features": n_embd, "out_features": vocab_size, "bias": False}},
+            {"softmaxlast": {"dim": -1}},
+        ]
+
+    @parameterized.expand([
+        (1.0, None),
+        (1.0, 3),
+        (0.0, None),
+    ])
+    def test_generate_tokens_with_bfloat16_model(self, temperature, top_k):
+        """Generation must succeed for bfloat16 models (imported Gemma-like precision)."""
+        layers = self._make_gemma_like_layers()
+        model = NeuralNetworkModel("test_bf16", Mapper(layers, {"adamw": {"lr": 1e-4}}))
+        model.to(dtype=torch.bfloat16)
+
+        tokens = model.generate_tokens([[0]], block_size=8, max_new_tokens=3,
+                                       temperature=temperature, top_k=top_k)
+
+        self.assertIsNotNone(tokens)
+        self.assertGreaterEqual(len(tokens), 1)
+        self.assertFalse(model.layers.training)
+
+    @parameterized.expand([
+        (1.0, None),
+        (1.0, 3),
+    ])
+    def test_generate_tokens_stream_with_bfloat16_model(self, temperature, top_k):
+        """Streaming generation must succeed for bfloat16 models."""
+        layers = self._make_gemma_like_layers()
+        model = NeuralNetworkModel("test_bf16_stream", Mapper(layers, {"adamw": {"lr": 1e-4}}))
+        model.to(dtype=torch.bfloat16)
+
+        streamed = list(model.generate_tokens_stream([[0]], block_size=8, max_new_tokens=3,
+                                                     temperature=temperature, top_k=top_k))
+
+        self.assertEqual(len(streamed), 3)
+        for token in streamed:
+            self.assertIsInstance(token, int)
+
+    def test_compute_output_with_bfloat16_model_converts_float_input(self):
+        """compute_output must cast floating-point inputs to model dtype for bf16 models."""
+        layers = [
+            {"linear": {"in_features": 4, "out_features": 4}},
+            {"softmax": {"dim": -1}},
+        ]
+        model = NeuralNetworkModel("test_bf16_output", Mapper(layers, {"sgd": {}}))
+        model.to(dtype=torch.bfloat16)
+
+        # float32 input should be converted to bf16 before the bf16 linear layer
+        output, cost = model.compute_output([[0.1, 0.2, 0.3, 0.4]])
+
+        self.assertIsNotNone(output)
+        self.assertIsNone(cost)
+
     @parameterized.expand([
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"tanh": {}},
