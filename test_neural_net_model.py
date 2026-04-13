@@ -433,6 +433,26 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertIsNotNone(output)
         self.assertIsNone(cost)
 
+    @unittest.skipUnless(os.path.exists(NeuralNetworkModel.SHM_PATH),
+                         f"Requires {NeuralNetworkModel.SHM_PATH} (shared memory)")
+    def test_deserialize_restores_bfloat16_dtype(self):
+        """deserialize must restore bfloat16 dtype so parameters are not silently upcast to float32."""
+        layers = self._make_gemma_like_layers()
+        model = NeuralNetworkModel("test_bf16_deser", Mapper(layers, {"adamw": {"lr": 1e-4}}))
+        model.to(dtype=torch.bfloat16)
+        model.serialize()
+
+        restored = NeuralNetworkModel.deserialize("test_bf16_deser")
+        try:
+            for name, param in restored.named_parameters():
+                self.assertEqual(param.dtype, torch.bfloat16,
+                                 f"Parameter {name} should be bfloat16 after deserialization")
+            # generation must work on the deserialized bf16 model
+            tokens = restored.generate_tokens([[0]], block_size=8, max_new_tokens=2)
+            self.assertGreaterEqual(len(tokens), 1)
+        finally:
+            NeuralNetworkModel.delete("test_bf16_deser")
+
     @parameterized.expand([
         ([{"embedding": {"num_embeddings": 8, "embedding_dim": 2}},
           {"tanh": {}},

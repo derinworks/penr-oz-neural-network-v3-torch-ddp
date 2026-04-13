@@ -142,6 +142,19 @@ class NeuralNetworkModel(nn.Module):
             model = cls(model_id, Mapper(data["layers"], data["optim"]))
             if ddp.master_proc():
                 log.info(f"Created model {model_id}")
+            # Restore model dtype from saved state to ensure consistent parameters.
+            # Without this, load_state_dict copy_ semantics would silently upcast
+            # reduced-precision weights (e.g. bfloat16) to the default float32, causing
+            # dtype mismatches inside the model (e.g. float input vs bf16 linear weight).
+            saved_dtype = next(
+                (v.dtype for v in data["state"].values()
+                 if isinstance(v, torch.Tensor) and v.is_floating_point()),
+                None,
+            )
+            if saved_dtype is not None and saved_dtype != torch.float32:
+                model.to(dtype=saved_dtype)
+                if ddp.master_proc():
+                    log.info(f"Restored model {model_id} dtype to {saved_dtype}")
             model.load_state_dict(data["state"])
             if ddp.master_proc():
                 log.info(f"Loaded state into model {model_id}")
