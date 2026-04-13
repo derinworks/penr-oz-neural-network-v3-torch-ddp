@@ -348,8 +348,7 @@ class NeuralNetworkModel(nn.Module):
     def _generate_next_token(self, context: Tensor, block_size: int, temperature: float,
                              top_k: int | None, softmax_layer,
                              kv_cache: KVCache | None = None,
-                             pos_embeddings: list[PositionEmbedding] | None = None,
-                             model_dtype: torch.dtype = torch.float32) -> Tensor:
+                             pos_embeddings: list[PositionEmbedding] | None = None) -> Tensor:
         """Generate a single next token given the current context.
         :param context: Current token context tensor
         :param block_size: Max context length
@@ -358,7 +357,6 @@ class NeuralNetworkModel(nn.Module):
         :param softmax_layer: Softmax layer for probability computation
         :param kv_cache: Optional KV cache for incremental decoding
         :param pos_embeddings: Cached list of PositionEmbedding modules
-        :param model_dtype: Dtype of model parameters (used to ensure input tensor compatibility)
         :return: next token index tensor
         """
         if kv_cache is not None and kv_cache.seq_len() > 0:
@@ -387,17 +385,11 @@ class NeuralNetworkModel(nn.Module):
             else:
                 top_k_result = logits.sort(dim=-1, descending=True)
             probs = softmax_layer.forward(top_k_result.values / temperature)
-            # multinomial requires float input; cast from bf16/other reduced precision
-            if model_dtype != torch.float32:
-                probs = probs.float()
-            choice = torch.multinomial(probs, num_samples=1)
+            choice = torch.multinomial(probs.float(), num_samples=1)
             next_idx = top_k_result.indices[:, -1, :].gather(dim=1, index=choice)
         else:  # next from logits by temperature ratio
             probs = softmax_layer.forward(logits / temperature)
-            # multinomial requires float input; cast from bf16/other reduced precision
-            if model_dtype != torch.float32:
-                probs = probs.float()
-            next_idx = torch.multinomial(probs, num_samples=1)
+            next_idx = torch.multinomial(probs.float(), num_samples=1)
         return next_idx
 
     def _find_attention_layers(self) -> list[CausalSelfAttention]:
@@ -432,7 +424,7 @@ class NeuralNetworkModel(nn.Module):
     def _prepare_generation(self, input_context: list, max_new_tokens: int, temperature: float,
                             top_k: int | None):
         """Common setup for token generation.
-        :return: (context tensor, softmax_layer, model_dtype)
+        :return: (context tensor, softmax_layer)
         """
         # generating is not training
         self.eval()
@@ -440,7 +432,6 @@ class NeuralNetworkModel(nn.Module):
         # initialize context
         first_param = next(self.parameters())
         device = first_param.device
-        model_dtype = first_param.dtype
         context = torch.tensor(input_context, dtype=torch.long, device=device)
         # log info
         top_k_msg = "" if top_k is None else f" top {top_k}"
@@ -448,20 +439,19 @@ class NeuralNetworkModel(nn.Module):
                  f" using device {device}")
         # prep Softmax layer
         softmax_layer = self.layers[-1] if self._is_softmax_last else SoftmaxOnLast
-        return context, softmax_layer, model_dtype
+        return context, softmax_layer
 
     @torch.inference_mode()
     def generate_tokens(self, input_context: list, block_size: int, max_new_tokens: int,
                         temperature=1.0, top_k: int | None=None, stop_token: int | None=None) -> list:
-        context, softmax_layer, model_dtype = self._prepare_generation(input_context, max_new_tokens,
-                                                                        temperature, top_k)
+        context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
+                                                            temperature, top_k)
         cache, pos_embeddings = self._attach_kv_cache()
         try:
             # generate up to max new tokens
             for sample_idx in range(max_new_tokens):
                 next_idx = self._generate_next_token(context, block_size, temperature, top_k,
-                                                     softmax_layer, cache, pos_embeddings,
-                                                     model_dtype)
+                                                     softmax_layer, cache, pos_embeddings)
                 # Append next token in for next prediction
                 context = torch.cat((context, next_idx), dim=1)
                 # Stop early if stop_token is encountered
@@ -487,16 +477,15 @@ class NeuralNetworkModel(nn.Module):
         :param stop_token: Optional token id that halts generation early when predicted as the next token
         :yields: individual token id (int)
         """
-        context, softmax_layer, model_dtype = self._prepare_generation(input_context, max_new_tokens,
-                                                                        temperature, top_k)
+        context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
+                                                            temperature, top_k)
         cache, pos_embeddings = self._attach_kv_cache()
         try:
             log.info("Streaming token generation started")
             # generate up to max new tokens
             for sample_idx in range(max_new_tokens):
                 next_idx = self._generate_next_token(context, block_size, temperature, top_k,
-                                                     softmax_layer, cache, pos_embeddings,
-                                                     model_dtype)
+                                                     softmax_layer, cache, pos_embeddings)
                 # Append next token in for next prediction
                 context = torch.cat((context, next_idx), dim=1)
                 # Yield the newly generated token
