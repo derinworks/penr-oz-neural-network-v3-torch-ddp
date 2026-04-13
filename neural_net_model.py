@@ -142,6 +142,19 @@ class NeuralNetworkModel(nn.Module):
             model = cls(model_id, Mapper(data["layers"], data["optim"]))
             if ddp.master_proc():
                 log.info(f"Created model {model_id}")
+            # Restore model dtype from saved state to ensure consistent parameters.
+            # Without this, load_state_dict copy_ semantics would silently upcast
+            # reduced-precision weights (e.g. bfloat16) to the default float32, causing
+            # dtype mismatches inside the model (e.g. float input vs bf16 linear weight).
+            saved_dtype = next(
+                (v.dtype for v in data["state"].values()
+                 if isinstance(v, torch.Tensor) and v.is_floating_point()),
+                None,
+            )
+            if saved_dtype is not None and saved_dtype != torch.float32:
+                model.to(dtype=saved_dtype)
+                if ddp.master_proc():
+                    log.info(f"Restored model {model_id} dtype to {saved_dtype}")
             model.load_state_dict(data["state"])
             if ddp.master_proc():
                 log.info(f"Loaded state into model {model_id}")
@@ -270,9 +283,14 @@ class NeuralNetworkModel(nn.Module):
         self.eval()
         self.layers.training = False
         # forward pass
-        device = next(self.parameters()).device
+        first_param = next(self.parameters())
+        device = first_param.device
+        model_dtype = first_param.dtype
         log.info(f"Computing model output using device {device}")
         input_tensor = torch.tensor(input_data, device=device)
+        # convert floating-point inputs to model dtype to avoid precision mismatch (e.g. bf16 models)
+        if input_tensor.is_floating_point():
+            input_tensor = input_tensor.to(model_dtype)
         if target is not None:
             target = torch.tensor(target, device=device)
         activations, cost = self(input_tensor, target)
@@ -380,11 +398,11 @@ class NeuralNetworkModel(nn.Module):
             else:
                 top_k_result = logits.sort(dim=-1, descending=True)
             probs = softmax_layer.forward(top_k_result.values / temperature)
-            choice = torch.multinomial(probs, num_samples=1)
+            choice = torch.multinomial(probs.float(), num_samples=1)
             next_idx = top_k_result.indices[:, -1, :].gather(dim=1, index=choice)
         else:  # next from logits by temperature ratio
             probs = softmax_layer.forward(logits / temperature)
-            next_idx = torch.multinomial(probs, num_samples=1)
+            next_idx = torch.multinomial(probs.float(), num_samples=1)
         return next_idx
 
     def _find_attention_layers(self) -> list[CausalSelfAttention]:
@@ -425,7 +443,8 @@ class NeuralNetworkModel(nn.Module):
         self.eval()
         self.layers.training = False
         # initialize context
-        device = next(self.parameters()).device
+        first_param = next(self.parameters())
+        device = first_param.device
         context = torch.tensor(input_context, dtype=torch.long, device=device)
         # log info
         top_k_msg = "" if top_k is None else f" top {top_k}"
@@ -439,7 +458,7 @@ class NeuralNetworkModel(nn.Module):
     def generate_tokens(self, input_context: list, block_size: int, max_new_tokens: int,
                         temperature=1.0, top_k: int | None=None, stop_token: int | None=None) -> list:
         context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
-                                                          temperature, top_k)
+                                                            temperature, top_k)
         cache, pos_embeddings = self._attach_kv_cache()
         try:
             # generate up to max new tokens
@@ -472,7 +491,7 @@ class NeuralNetworkModel(nn.Module):
         :yields: individual token id (int)
         """
         context, softmax_layer = self._prepare_generation(input_context, max_new_tokens,
-                                                          temperature, top_k)
+                                                            temperature, top_k)
         cache, pos_embeddings = self._attach_kv_cache()
         try:
             log.info("Streaming token generation started")
