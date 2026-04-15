@@ -102,8 +102,8 @@ class DatasetRequest(BaseModel):
 class TokenizerRequest(BaseModel):
     encoding: str = Field(
         ...,
-        examples=["gpt2"],
-        description="HuggingFace model name for tokenizer"
+        examples=["tiktoken/gpt2"],
+        description="Tiktoken encoding (prefix 'tiktoken/') or HuggingFace model name for tokenizer"
     )
 
 class DownloadDatasetRequest(DatasetRequest, TokenizerRequest):

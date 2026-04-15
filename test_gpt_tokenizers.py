@@ -3,7 +3,67 @@ from unittest.mock import patch, MagicMock
 from gpt_tokenizers import Tokenizer
 
 
-class TestTokenizer(unittest.TestCase):
+class TestTiktokenTokenizer(unittest.TestCase):
+
+    def _make_mock_enc(self):
+        mock_enc = MagicMock()
+        mock_enc.eot_token = 50256
+        mock_enc.encode_ordinary.side_effect = lambda text: (
+            [15496, 995] if text == "Hello world"
+            else [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13] if text == "The quick brown fox jumps over the lazy dog."
+            else []
+        )
+        mock_enc.decode.side_effect = lambda tokens: (
+            "Hello world" if tokens == [15496, 995, 50256]
+            else "The quick brown fox jumps over the lazy dog." if tokens == [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 50256]
+            else ""
+        )
+        return mock_enc
+
+    @patch("gpt_tokenizers.tiktoken")
+    def test_tokenize(self, mock_tiktoken):
+        mock_tiktoken.get_encoding.return_value = self._make_mock_enc()
+        tokenizer = Tokenizer("tiktoken/gpt2")
+        tokens = tokenizer.tokenize("Hello world")
+
+        self.assertIsInstance(tokens, list)
+        self.assertGreater(len(tokens), 0)
+        self.assertTrue(all(isinstance(t, int) for t in tokens))
+        mock_tiktoken.get_encoding.assert_called_once_with("gpt2")
+
+    @patch("gpt_tokenizers.tiktoken")
+    def test_decode(self, mock_tiktoken):
+        mock_tiktoken.get_encoding.return_value = self._make_mock_enc()
+        tokenizer = Tokenizer("tiktoken/gpt2")
+        original_text = "Hello world"
+        tokens = tokenizer.tokenize(original_text)
+        decoded_text = tokenizer.decode(tokens)
+
+        self.assertIsInstance(decoded_text, str)
+        self.assertIn("Hello world", decoded_text)
+
+    @patch("gpt_tokenizers.tiktoken")
+    def test_tokenize_decode_roundtrip(self, mock_tiktoken):
+        mock_tiktoken.get_encoding.return_value = self._make_mock_enc()
+        tokenizer = Tokenizer("tiktoken/gpt2")
+        original_text = "The quick brown fox jumps over the lazy dog."
+
+        tokens = tokenizer.tokenize(original_text)
+        decoded_text = tokenizer.decode(tokens)
+
+        self.assertIn(original_text, decoded_text)
+
+    @patch("gpt_tokenizers.tiktoken")
+    def test_tokenize_empty_string(self, mock_tiktoken):
+        mock_tiktoken.get_encoding.return_value = self._make_mock_enc()
+        tokenizer = Tokenizer("tiktoken/gpt2")
+        tokens = tokenizer.tokenize("")
+
+        # Even empty string should have EOT token
+        self.assertEqual(len(tokens), 1)
+
+
+class TestAutoTokenizer(unittest.TestCase):
 
     def _make_mock_enc(self):
         mock_enc = MagicMock()
@@ -29,6 +89,7 @@ class TestTokenizer(unittest.TestCase):
         self.assertIsInstance(tokens, list)
         self.assertGreater(len(tokens), 0)
         self.assertTrue(all(isinstance(t, int) for t in tokens))
+        mock_auto_tokenizer.from_pretrained.assert_called_once_with("gpt2")
 
     @patch("gpt_tokenizers.AutoTokenizer")
     def test_decode(self, mock_auto_tokenizer):
@@ -39,7 +100,6 @@ class TestTokenizer(unittest.TestCase):
         decoded_text = tokenizer.decode(tokens)
 
         self.assertIsInstance(decoded_text, str)
-        # Decoded text should contain the original (may have extra tokens like EOS)
         self.assertIn("Hello world", decoded_text)
 
     @patch("gpt_tokenizers.AutoTokenizer")
@@ -51,7 +111,6 @@ class TestTokenizer(unittest.TestCase):
         tokens = tokenizer.tokenize(original_text)
         decoded_text = tokenizer.decode(tokens)
 
-        # Should contain the original text
         self.assertIn(original_text, decoded_text)
 
     @patch("gpt_tokenizers.AutoTokenizer")

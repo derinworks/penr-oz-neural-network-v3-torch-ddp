@@ -1,13 +1,22 @@
+import tiktoken
+from tiktoken import Encoding
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+TIKTOKEN_PREFIX = "tiktoken/"
+
 class Tokenizer:
-    def __init__(self, model_name: str):
-        self._enc: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_name)
+    def __init__(self, encoding_name: str):
+        if encoding_name.startswith(TIKTOKEN_PREFIX):
+            enc = tiktoken.get_encoding(encoding_name[len(TIKTOKEN_PREFIX):])
+            self._tokenize = lambda text: enc.encode_ordinary(text) + [enc.eot_token]
+            self._decode = enc.decode
+        else:
+            enc = AutoTokenizer.from_pretrained(encoding_name)
+            self._tokenize = lambda text: enc.encode(text, add_special_tokens=False) + ([enc.eos_token_id] if enc.eos_token_id is not None else [])
+            self._decode = enc.decode
 
     def tokenize(self, text: str) -> list[int]:
-        tokens = self._enc.encode(text, add_special_tokens=False) + ([self._enc.eos_token_id] if self._enc.eos_token_id is not None else [])
-        return tokens
+        return self._tokenize(text)
 
     def decode(self, tokens: list[int]) -> str:
-        decoded_text = self._enc.decode(tokens)
-        return decoded_text
+        return self._decode(tokens)
