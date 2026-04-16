@@ -69,7 +69,7 @@ class CausalSelfAttention(nn.Module):
 
         # Apply rotary position embeddings when enabled
         if self.rope_theta is not None:
-            offset = self._kv_cache.seq_len() if self._kv_cache is not None else 0
+            offset = self._kv_cache.seq_len(self._layer_idx) if self._kv_cache is not None else 0
             q, k = self._apply_rope(q, k, head_dim, offset)
 
         # Expand KV heads for grouped-query attention

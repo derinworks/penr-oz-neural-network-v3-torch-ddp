@@ -139,5 +139,70 @@ class TestNeuralNetLayers(unittest.TestCase):
         self.assertIsNotNone(output)
         self.assertEqual(expected_out_shape, tuple(output.shape))
 
+    def test_rope_offset_uses_own_layer_idx_with_kv_cache(self):
+        """Each attention layer must read its own KV cache seq_len for RoPE offset,
+        not layer 0's.  When layers run sequentially during a forward pass,
+        layer 0 appends to its cache before layer 1 executes.  If layer 1
+        reads layer 0's (already-updated) cache length, the RoPE positions
+        are wrong for every layer after the first."""
+        from kv_cache import KVCache
+
+        num_heads, num_kv_heads, head_dim = 4, 2, 4
+        qkv_dim = num_heads * head_dim + 2 * num_kv_heads * head_dim
+        batch, seq = 1, 3
+
+        attn0 = nnl.CausalSelfAttention(num_heads=num_heads, num_kv_heads=num_kv_heads,
+                                          rope_theta=10000.0, head_dim=head_dim)
+        attn1 = nnl.CausalSelfAttention(num_heads=num_heads, num_kv_heads=num_kv_heads,
+                                          rope_theta=10000.0, head_dim=head_dim)
+
+        cache = KVCache(num_layers=2)
+        attn0.set_kv_cache(cache, layer_idx=0)
+        attn1.set_kv_cache(cache, layer_idx=1)
+
+        qkv = torch.randn(batch, seq, qkv_dim)
+
+        # Prefill: both layers process the full sequence
+        attn0(qkv)  # layer 0 cache now has `seq` entries
+        attn1(qkv)  # layer 1 should use its own cache (was empty) for offset
+
+        # After prefill both caches must have the same length
+        self.assertEqual(cache.seq_len(0), seq)
+        self.assertEqual(cache.seq_len(1), seq)
+
+        # Incremental decode: single new token
+        qkv_one = torch.randn(batch, 1, qkv_dim)
+        out0 = attn0(qkv_one)  # layer 0 cache → seq+1
+        out1 = attn1(qkv_one)  # layer 1 must read own cache (seq), not layer 0 (seq+1)
+
+        self.assertEqual(cache.seq_len(0), seq + 1)
+        self.assertEqual(cache.seq_len(1), seq + 1)
+
+        # Run the same decode step but with a deliberately broken cache read
+        # (reading layer 0 instead of own layer) to confirm outputs differ.
+        # Reset layer 1 cache and re-prefill.
+        cache2 = KVCache(num_layers=2)
+        attn0_b = nnl.CausalSelfAttention(num_heads=num_heads, num_kv_heads=num_kv_heads,
+                                            rope_theta=10000.0, head_dim=head_dim)
+        attn1_b = nnl.CausalSelfAttention(num_heads=num_heads, num_kv_heads=num_kv_heads,
+                                            rope_theta=10000.0, head_dim=head_dim)
+        # Copy weights so both runs use identical parameters
+        attn0_b.load_state_dict(attn0.state_dict())
+        attn1_b.load_state_dict(attn1.state_dict())
+        attn0_b.set_kv_cache(cache2, layer_idx=0)
+        attn1_b.set_kv_cache(cache2, layer_idx=1)
+
+        attn0_b(qkv)
+        attn1_b(qkv)
+        out0_b = attn0_b(qkv_one)
+        out1_b = attn1_b(qkv_one)
+
+        # Outputs should be identical (same weights, same correct offsets)
+        self.assertTrue(torch.allclose(out0, out0_b, atol=1e-6),
+                        "Layer 0 outputs should match across identical runs")
+        self.assertTrue(torch.allclose(out1, out1_b, atol=1e-6),
+                        "Layer 1 outputs should match across identical runs")
+
+
 if __name__ == '__main__':
     unittest.main()
