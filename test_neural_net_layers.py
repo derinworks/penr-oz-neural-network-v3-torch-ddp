@@ -178,30 +178,14 @@ class TestNeuralNetLayers(unittest.TestCase):
         self.assertEqual(cache.seq_len(0), seq + 1)
         self.assertEqual(cache.seq_len(1), seq + 1)
 
-        # Run the same decode step but with a deliberately broken cache read
-        # (reading layer 0 instead of own layer) to confirm outputs differ.
-        # Reset layer 1 cache and re-prefill.
-        cache2 = KVCache(num_layers=2)
-        attn0_b = nnl.CausalSelfAttention(num_heads=num_heads, num_kv_heads=num_kv_heads,
-                                            rope_theta=10000.0, head_dim=head_dim)
-        attn1_b = nnl.CausalSelfAttention(num_heads=num_heads, num_kv_heads=num_kv_heads,
-                                            rope_theta=10000.0, head_dim=head_dim)
-        # Copy weights so both runs use identical parameters
-        attn0_b.load_state_dict(attn0.state_dict())
-        attn1_b.load_state_dict(attn1.state_dict())
-        attn0_b.set_kv_cache(cache2, layer_idx=0)
-        attn1_b.set_kv_cache(cache2, layer_idx=1)
-
-        attn0_b(qkv)
-        attn1_b(qkv)
-        out0_b = attn0_b(qkv_one)
-        out1_b = attn1_b(qkv_one)
-
-        # Outputs should be identical (same weights, same correct offsets)
-        self.assertTrue(torch.allclose(out0, out0_b, atol=1e-6),
-                        "Layer 0 outputs should match across identical runs")
-        self.assertTrue(torch.allclose(out1, out1_b, atol=1e-6),
-                        "Layer 1 outputs should match across identical runs")
+        # Both layers have identical config (same inv_freq buffer, no trainable
+        # weights) and received the same inputs with the same correct RoPE
+        # offsets (0 during prefill, seq during decode).  Their outputs must
+        # match.  If the bug were present, layer 1 would have used layer 0's
+        # already-updated cache length (seq+1 instead of seq) for its RoPE
+        # offset, producing a different result.
+        self.assertTrue(torch.allclose(out0, out1, atol=1e-6),
+                        "Layer 0 and Layer 1 outputs should match when using correct per-layer offsets")
 
 
 if __name__ == '__main__':
