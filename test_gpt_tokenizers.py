@@ -1,6 +1,3 @@
-import json
-import os
-import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 from gpt_tokenizers import Tokenizer
@@ -127,16 +124,7 @@ class TestAutoTokenizer(unittest.TestCase):
 
 
 class TestProcessorTokenizer(unittest.TestCase):
-    """Multimodal models matching _PROCESSOR_PATTERNS load the tokenizer class
-    from processor_config.json to avoid pulling in PIL for image processing."""
-
-    def _make_processor_config(self, tokenizer_class="GemmaTokenizer"):
-        """Write a temp processor_config.json and return its path."""
-        f = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump({"processor_class": "Gemma4Processor",
-                    "tokenizer_class": tokenizer_class}, f)
-        f.close()
-        return f.name
+    """AutoProcessor is used for multimodal models matching _PROCESSOR_PATTERNS."""
 
     def _make_mock_tokenizer(self):
         mock_enc = MagicMock()
@@ -149,60 +137,46 @@ class TestProcessorTokenizer(unittest.TestCase):
         )
         return mock_enc
 
-    @patch("gpt_tokenizers.hf_hub_download")
-    @patch("gpt_tokenizers.transformers")
-    def test_tokenizer_loaded_from_processor_config(self, mock_transformers, mock_download):
-        path = self._make_processor_config("GemmaTokenizer")
-        self.addCleanup(os.unlink, path)
-        mock_download.return_value = path
-        mock_tok_cls = MagicMock()
-        mock_tok_cls.from_pretrained.return_value = self._make_mock_tokenizer()
-        mock_transformers.GemmaTokenizer = mock_tok_cls
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_processor_tokenizer_used(self, mock_auto_processor):
+        mock_tok = self._make_mock_tokenizer()
+        mock_proc = MagicMock()
+        mock_proc.tokenizer = mock_tok
+        mock_auto_processor.from_pretrained.return_value = mock_proc
 
         tokenizer = Tokenizer("google/gemma-4-E2B")
         tokens = tokenizer.tokenize("Hello world")
 
         self.assertEqual(tokens, [4103, 2134, 1])
-        mock_download.assert_called_once()
-        mock_tok_cls.from_pretrained.assert_called_once()
+        mock_auto_processor.from_pretrained.assert_called_once_with("google/gemma-4-E2B")
 
-    @patch("gpt_tokenizers.hf_hub_download")
-    @patch("gpt_tokenizers.transformers")
-    def test_processor_decode(self, mock_transformers, mock_download):
-        path = self._make_processor_config("GemmaTokenizer")
-        self.addCleanup(os.unlink, path)
-        mock_download.return_value = path
-        mock_tok_cls = MagicMock()
-        mock_tok_cls.from_pretrained.return_value = self._make_mock_tokenizer()
-        mock_transformers.GemmaTokenizer = mock_tok_cls
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_processor_decode(self, mock_auto_processor):
+        mock_tok = self._make_mock_tokenizer()
+        mock_proc = MagicMock()
+        mock_proc.tokenizer = mock_tok
+        mock_auto_processor.from_pretrained.return_value = mock_proc
 
         tokenizer = Tokenizer("google/gemma-4-E2B")
         decoded = tokenizer.decode([4103, 2134, 1])
         self.assertEqual(decoded, "Hello world")
 
-    @patch("gpt_tokenizers.hf_hub_download")
-    @patch("gpt_tokenizers.AutoTokenizer")
-    def test_falls_back_to_auto_tokenizer_when_class_missing(self, mock_auto_tokenizer, mock_download):
-        """When processor_config has no tokenizer_class, fall back to AutoTokenizer."""
-        f = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump({"processor_class": "SomeProcessor"}, f)
-        f.close()
-        self.addCleanup(os.unlink, f.name)
-        mock_download.return_value = f.name
-        mock_enc = MagicMock()
-        mock_enc.eos_token_id = 1
-        mock_enc.encode.return_value = [100]
-        mock_auto_tokenizer.from_pretrained.return_value = mock_enc
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_processor_without_tokenizer_attr_used_directly(self, mock_auto_processor):
+        """When processor has no .tokenizer attr, use processor itself."""
+        mock_enc = MagicMock(spec=[])
+        mock_enc.eos_token_id = 2
+        mock_enc.encode = MagicMock(return_value=[100, 200])
+        mock_enc.decode = MagicMock(return_value="test")
+        mock_auto_processor.from_pretrained.return_value = mock_enc
 
         tokenizer = Tokenizer("google/gemma-3-1b")
         tokens = tokenizer.tokenize("test")
-
-        self.assertEqual(tokens, [100, 1])
-        mock_auto_tokenizer.from_pretrained.assert_called_once()
+        self.assertEqual(tokens, [100, 200, 2])
 
     @patch("gpt_tokenizers.AutoTokenizer")
     def test_non_gemma_uses_auto_tokenizer(self, mock_auto_tokenizer):
-        """Non-gemma models use AutoTokenizer directly."""
+        """Non-gemma models use AutoTokenizer, not AutoProcessor."""
         mock_enc = MagicMock()
         mock_enc.eos_token_id = 50256
         mock_enc.encode.return_value = [15496, 995]
