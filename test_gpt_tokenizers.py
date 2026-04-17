@@ -81,9 +81,7 @@ class TestAutoTokenizer(unittest.TestCase):
         return mock_enc
 
     @patch("gpt_tokenizers.AutoTokenizer")
-    @patch("gpt_tokenizers.AutoProcessor")
-    def test_tokenize(self, mock_auto_processor, mock_auto_tokenizer):
-        mock_auto_processor.from_pretrained.side_effect = Exception("no processor")
+    def test_tokenize(self, mock_auto_tokenizer):
         mock_auto_tokenizer.from_pretrained.return_value = self._make_mock_enc()
         tokenizer = Tokenizer("gpt2")
         tokens = tokenizer.tokenize("Hello world")
@@ -94,9 +92,7 @@ class TestAutoTokenizer(unittest.TestCase):
         mock_auto_tokenizer.from_pretrained.assert_called_once_with("gpt2")
 
     @patch("gpt_tokenizers.AutoTokenizer")
-    @patch("gpt_tokenizers.AutoProcessor")
-    def test_decode(self, mock_auto_processor, mock_auto_tokenizer):
-        mock_auto_processor.from_pretrained.side_effect = Exception("no processor")
+    def test_decode(self, mock_auto_tokenizer):
         mock_auto_tokenizer.from_pretrained.return_value = self._make_mock_enc()
         tokenizer = Tokenizer("gpt2")
         original_text = "Hello world"
@@ -107,9 +103,7 @@ class TestAutoTokenizer(unittest.TestCase):
         self.assertIn("Hello world", decoded_text)
 
     @patch("gpt_tokenizers.AutoTokenizer")
-    @patch("gpt_tokenizers.AutoProcessor")
-    def test_tokenize_decode_roundtrip(self, mock_auto_processor, mock_auto_tokenizer):
-        mock_auto_processor.from_pretrained.side_effect = Exception("no processor")
+    def test_tokenize_decode_roundtrip(self, mock_auto_tokenizer):
         mock_auto_tokenizer.from_pretrained.return_value = self._make_mock_enc()
         tokenizer = Tokenizer("gpt2")
         original_text = "The quick brown fox jumps over the lazy dog."
@@ -120,9 +114,7 @@ class TestAutoTokenizer(unittest.TestCase):
         self.assertIn(original_text, decoded_text)
 
     @patch("gpt_tokenizers.AutoTokenizer")
-    @patch("gpt_tokenizers.AutoProcessor")
-    def test_tokenize_empty_string(self, mock_auto_processor, mock_auto_tokenizer):
-        mock_auto_processor.from_pretrained.side_effect = Exception("no processor")
+    def test_tokenize_empty_string(self, mock_auto_tokenizer):
         mock_auto_tokenizer.from_pretrained.return_value = self._make_mock_enc()
         tokenizer = Tokenizer("gpt2")
         tokens = tokenizer.tokenize("")
@@ -132,7 +124,7 @@ class TestAutoTokenizer(unittest.TestCase):
 
 
 class TestAutoProcessor(unittest.TestCase):
-    """AutoProcessor is preferred for multimodal models like Gemma 4."""
+    """AutoProcessor is used for multimodal models matching _PROCESSOR_PATTERNS."""
 
     def _make_mock_tokenizer(self):
         mock_enc = MagicMock()
@@ -169,10 +161,22 @@ class TestAutoProcessor(unittest.TestCase):
         decoded = tokenizer.decode([4103, 2134, 1])
         self.assertEqual(decoded, "Hello world")
 
-    @patch("gpt_tokenizers.AutoTokenizer")
     @patch("gpt_tokenizers.AutoProcessor")
-    def test_falls_back_to_auto_tokenizer(self, mock_auto_processor, mock_auto_tokenizer):
-        mock_auto_processor.from_pretrained.side_effect = Exception("no processor")
+    def test_processor_without_tokenizer_attr_used_directly(self, mock_auto_processor):
+        """When processor has no .tokenizer attr, use processor itself."""
+        mock_enc = MagicMock(spec=[])
+        mock_enc.eos_token_id = 2
+        mock_enc.encode = MagicMock(return_value=[100, 200])
+        mock_enc.decode = MagicMock(return_value="test")
+        mock_auto_processor.from_pretrained.return_value = mock_enc
+
+        tokenizer = Tokenizer("google/gemma-3-1b")
+        tokens = tokenizer.tokenize("test")
+        self.assertEqual(tokens, [100, 200, 2])
+
+    @patch("gpt_tokenizers.AutoTokenizer")
+    def test_non_gemma_uses_auto_tokenizer(self, mock_auto_tokenizer):
+        """Non-gemma models use AutoTokenizer, not AutoProcessor."""
         mock_enc = MagicMock()
         mock_enc.eos_token_id = 50256
         mock_enc.encode.return_value = [15496, 995]
@@ -183,19 +187,6 @@ class TestAutoProcessor(unittest.TestCase):
 
         self.assertEqual(tokens, [15496, 995, 50256])
         mock_auto_tokenizer.from_pretrained.assert_called_once_with("gpt2")
-
-    @patch("gpt_tokenizers.AutoProcessor")
-    def test_processor_without_tokenizer_attr_used_directly(self, mock_auto_processor):
-        """When processor has no .tokenizer attr, use processor itself (it may be a tokenizer)."""
-        mock_enc = MagicMock(spec=[])
-        mock_enc.eos_token_id = 2
-        mock_enc.encode = MagicMock(return_value=[100, 200])
-        mock_enc.decode = MagicMock(return_value="test")
-        mock_auto_processor.from_pretrained.return_value = mock_enc
-
-        tokenizer = Tokenizer("some-model")
-        tokens = tokenizer.tokenize("test")
-        self.assertEqual(tokens, [100, 200, 2])
 
 
 if __name__ == '__main__':
