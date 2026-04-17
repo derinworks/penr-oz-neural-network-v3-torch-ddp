@@ -188,13 +188,26 @@ class Mapper:
         n_layer = n_layer_override if n_layer_override is not None else text_config.num_hidden_layers
         intermediate_size = getattr(text_config, "intermediate_size", 4 * n_embd)
         rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-6)
-        rope_theta = getattr(text_config, "rope_theta", None)
-        if rope_theta is None:
-            rope_scaling = getattr(text_config, "rope_scaling", None)
-            if isinstance(rope_scaling, dict) and "sliding_attention" in rope_scaling:
-                rope_theta = rope_scaling["sliding_attention"].get("rope_theta", 10000.0)
-            else:
-                rope_theta = 10000.0
+        # Per-attention-type RoPE base: Gemma 3n/4 heterogeneous models use
+        # different rope_theta for sliding vs full attention layers (e.g.
+        # 10_000 local / 1_000_000 global).  Prefer dedicated config attrs
+        # (`rope_theta` = full, `rope_local_base_freq` = sliding); fall back
+        # to a `rope_scaling` dict keyed by attention type; finally default
+        # to 10_000 when nothing is configured.
+        rope_theta_full = getattr(text_config, "rope_theta", None)
+        rope_theta_local = getattr(text_config, "rope_local_base_freq", None)
+        rope_scaling = getattr(text_config, "rope_scaling", None)
+        if isinstance(rope_scaling, dict):
+            if rope_theta_full is None and "full_attention" in rope_scaling:
+                rope_theta_full = rope_scaling["full_attention"].get("rope_theta")
+            if rope_theta_local is None and "sliding_attention" in rope_scaling:
+                rope_theta_local = rope_scaling["sliding_attention"].get("rope_theta")
+        if rope_theta_full is None and rope_theta_local is None:
+            rope_theta_full = rope_theta_local = 10000.0
+        elif rope_theta_full is None:
+            rope_theta_full = rope_theta_local
+        elif rope_theta_local is None:
+            rope_theta_local = rope_theta_full
         attn_dropout = getattr(text_config, "attention_dropout", 0.0)
         activation = (getattr(text_config, "hidden_activation", None)
                       or getattr(text_config, "hidden_act", "gelu_pytorch_tanh"))
@@ -225,6 +238,7 @@ class Mapper:
                             and layer_types[i] == "full_attention")
             layer_head_dim = global_head_dim if is_full_attn else head_dim
             layer_kv_heads = n_global_kv_heads if is_full_attn else n_kv_heads
+            layer_rope_theta = rope_theta_full if is_full_attn else rope_theta_local
             qkv_dim = n_head * layer_head_dim + 2 * layer_kv_heads * layer_head_dim
             attn_out_dim = n_head * layer_head_dim
 
@@ -237,7 +251,7 @@ class Mapper:
                     {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
                     {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
                     {"attention": {"num_heads": n_head, "num_kv_heads": layer_kv_heads,
-                                   "dropout": attn_dropout, "rope_theta": rope_theta,
+                                   "dropout": attn_dropout, "rope_theta": layer_rope_theta,
                                    "head_dim": layer_head_dim}},
                     {"linear": {"in_features": attn_out_dim, "out_features": n_embd, "bias": False}},
                 ]},

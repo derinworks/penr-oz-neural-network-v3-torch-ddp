@@ -384,6 +384,39 @@ class TestMapper(unittest.TestCase):
         attn_cfg = layers[1]["transformerblock"]["attn_block"]["sequential"][2]["attention"]
         self.assertAlmostEqual(attn_cfg["rope_theta"], 50000.0)
 
+    def test_from_hf_config_gemma_per_layer_rope_theta(self):
+        """Heterogeneous models: sliding layers use local theta, full use global theta."""
+        n_layer = 4
+        cfg = self._make_gemma_config(model_type="gemma4", n_layer=n_layer,
+                                       multimodal=True)
+        # Simulate Gemma 3n-style config: rope_theta = global, rope_local_base_freq = local
+        cfg.text_config.rope_theta = 1000000.0
+        cfg.text_config.rope_local_base_freq = 10000.0
+        cfg.text_config.layer_types = ["sliding_attention", "full_attention",
+                                        "sliding_attention", "full_attention"]
+        layers = Mapper.from_hf_config(cfg)
+        for i, expected in enumerate((10000.0, 1000000.0, 10000.0, 1000000.0)):
+            attn_cfg = layers[1 + i]["transformerblock"]["attn_block"]["sequential"][2]["attention"]
+            self.assertAlmostEqual(attn_cfg["rope_theta"], expected,
+                                   msg=f"Layer {i} rope_theta mismatch")
+
+    def test_from_hf_config_gemma_per_layer_rope_theta_from_rope_scaling(self):
+        """Heterogeneous models: layer-specific rope_theta sourced from rope_scaling dict."""
+        n_layer = 3
+        cfg = self._make_gemma_config(model_type="gemma4", n_layer=n_layer,
+                                       multimodal=True)
+        del cfg.text_config.rope_theta
+        cfg.text_config.rope_scaling = {
+            "sliding_attention": {"rope_type": "default", "rope_theta": 50000.0},
+            "full_attention": {"rope_type": "proportional", "rope_theta": 1000000.0},
+        }
+        cfg.text_config.layer_types = ["full_attention", "sliding_attention", "full_attention"]
+        layers = Mapper.from_hf_config(cfg)
+        for i, expected in enumerate((1000000.0, 50000.0, 1000000.0)):
+            attn_cfg = layers[1 + i]["transformerblock"]["attn_block"]["sequential"][2]["attention"]
+            self.assertAlmostEqual(attn_cfg["rope_theta"], expected,
+                                   msg=f"Layer {i} rope_theta mismatch")
+
 
     def _make_hf_sd(self, n_layer=2, n_embd=32, n_head=2, vocab_size=64, block_size=16):
         """Build a fake HuggingFace GPT-2 state dict with the right shapes."""
