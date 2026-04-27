@@ -124,55 +124,35 @@ class TestAutoTokenizer(unittest.TestCase):
 
 
 class TestProcessorTokenizer(unittest.TestCase):
-    """AutoProcessor is used for multimodal models matching _PROCESSOR_PATTERNS."""
-
-    def _make_mock_tokenizer(self):
-        mock_enc = MagicMock()
-        mock_enc.eos_token_id = 1
-        mock_enc.encode.side_effect = lambda text, add_special_tokens=False: (
-            [4103, 2134] if text == "Hello world" else []
-        )
-        mock_enc.decode.side_effect = lambda tokens: (
-            "Hello world" if tokens == [4103, 2134, 1] else ""
-        )
-        return mock_enc
+    """AutoProcessor is used for multimodal models matching _PROCESSOR_PATTERNS.
+    Tokenization applies the chat template so the model sees correctly formatted input."""
 
     @patch("gpt_tokenizers.AutoProcessor")
-    def test_processor_tokenizer_used(self, mock_auto_processor):
-        mock_tok = self._make_mock_tokenizer()
+    def test_apply_chat_template_called(self, mock_auto_processor):
         mock_proc = MagicMock()
-        mock_proc.tokenizer = mock_tok
+        mock_proc.apply_chat_template.return_value = [2, 100, 200, 300]
+        mock_proc.tokenizer.decode.side_effect = lambda tokens: "Hello"
         mock_auto_processor.from_pretrained.return_value = mock_proc
 
         tokenizer = Tokenizer("google/gemma-4-E2B")
         tokens = tokenizer.tokenize("Hello world")
 
-        self.assertEqual(tokens, [4103, 2134, 1])
+        self.assertEqual(tokens, [2, 100, 200, 300])
+        mock_proc.apply_chat_template.assert_called_once_with(
+            [{"role": "user", "content": "Hello world"}],
+            tokenize=True, add_generation_prompt=True,
+        )
         mock_auto_processor.from_pretrained.assert_called_once_with("google/gemma-4-E2B")
 
     @patch("gpt_tokenizers.AutoProcessor")
     def test_processor_decode(self, mock_auto_processor):
-        mock_tok = self._make_mock_tokenizer()
         mock_proc = MagicMock()
-        mock_proc.tokenizer = mock_tok
+        mock_proc.tokenizer.decode.side_effect = lambda tokens: "Hello world"
         mock_auto_processor.from_pretrained.return_value = mock_proc
 
         tokenizer = Tokenizer("google/gemma-4-E2B")
-        decoded = tokenizer.decode([4103, 2134, 1])
+        decoded = tokenizer.decode([100, 200])
         self.assertEqual(decoded, "Hello world")
-
-    @patch("gpt_tokenizers.AutoProcessor")
-    def test_processor_without_tokenizer_attr_used_directly(self, mock_auto_processor):
-        """When processor has no .tokenizer attr, use processor itself."""
-        mock_enc = MagicMock(spec=[])
-        mock_enc.eos_token_id = 2
-        mock_enc.encode = MagicMock(return_value=[100, 200])
-        mock_enc.decode = MagicMock(return_value="test")
-        mock_auto_processor.from_pretrained.return_value = mock_enc
-
-        tokenizer = Tokenizer("google/gemma-3-1b")
-        tokens = tokenizer.tokenize("test")
-        self.assertEqual(tokens, [100, 200, 2])
 
     @patch("gpt_tokenizers.AutoTokenizer")
     def test_non_gemma_uses_auto_tokenizer(self, mock_auto_tokenizer):

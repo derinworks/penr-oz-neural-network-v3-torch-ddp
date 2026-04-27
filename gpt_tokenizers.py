@@ -18,21 +18,20 @@ class Tokenizer:
             enc = tiktoken.get_encoding(encoding_name[len(TIKTOKEN_PREFIX):])
             self._tokenize = lambda text: enc.encode_ordinary(text) + [enc.eot_token]
             self._decode = enc.decode
-        else:
-            enc = self._load_hf_tokenizer(encoding_name)
-            self._tokenize = lambda text: enc.encode(text, add_special_tokens=False) + ([enc.eos_token_id] if enc.eos_token_id is not None else [])
-            self._decode = enc.decode
-
-    @staticmethod
-    def _load_hf_tokenizer(encoding_name: str) -> PreTrainedTokenizerBase:
-        if any(p in encoding_name for p in _PROCESSOR_PATTERNS):
+        elif any(p in encoding_name for p in _PROCESSOR_PATTERNS):
             proc = AutoProcessor.from_pretrained(encoding_name)
             tokenizer = getattr(proc, "tokenizer", proc)
+            self._tokenize = lambda text: proc.apply_chat_template(
+                [{"role": "user", "content": text}],
+                tokenize=True, add_generation_prompt=True,
+            )
+            self._decode = tokenizer.decode
             log.info("Loaded tokenizer via AutoProcessor for %s", encoding_name)
-            return tokenizer
-        enc = AutoTokenizer.from_pretrained(encoding_name)
-        log.info("Loaded tokenizer via AutoTokenizer for %s", encoding_name)
-        return enc
+        else:
+            enc = AutoTokenizer.from_pretrained(encoding_name)
+            self._tokenize = lambda text: enc.encode(text, add_special_tokens=False) + ([enc.eos_token_id] if enc.eos_token_id is not None else [])
+            self._decode = enc.decode
+            log.info("Loaded tokenizer via AutoTokenizer for %s", encoding_name)
 
     def tokenize(self, text: str) -> list[int]:
         return self._tokenize(text)
