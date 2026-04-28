@@ -130,7 +130,8 @@ class TestProcessorTokenizer(unittest.TestCase):
     @patch("gpt_tokenizers.AutoProcessor")
     def test_apply_chat_template_called(self, mock_auto_processor):
         mock_proc = MagicMock()
-        mock_proc.apply_chat_template.return_value = [2, 100, 200, 300]
+        mock_proc.tokenizer.chat_template = "{% for m in messages %}..."
+        mock_proc.tokenizer.apply_chat_template.return_value = [2, 100, 200, 300]
         mock_proc.tokenizer.decode.side_effect = lambda tokens: "Hello"
         mock_auto_processor.from_pretrained.return_value = mock_proc
 
@@ -138,11 +139,25 @@ class TestProcessorTokenizer(unittest.TestCase):
         tokens = tokenizer.tokenize("Hello world")
 
         self.assertEqual(tokens, [2, 100, 200, 300])
-        mock_proc.apply_chat_template.assert_called_once_with(
+        mock_proc.tokenizer.apply_chat_template.assert_called_once_with(
             [{"role": "user", "content": "Hello world"}],
             tokenize=True, add_generation_prompt=True,
         )
         mock_auto_processor.from_pretrained.assert_called_once_with("google/gemma-4-E2B")
+
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_no_chat_template_falls_back_to_encode(self, mock_auto_processor):
+        """When neither processor nor tokenizer has a chat template, use plain encode."""
+        mock_proc = MagicMock()
+        mock_proc.chat_template = None
+        mock_proc.tokenizer.chat_template = None
+        mock_proc.tokenizer.eos_token_id = 1
+        mock_proc.tokenizer.encode.return_value = [100, 200]
+        mock_auto_processor.from_pretrained.return_value = mock_proc
+
+        tokenizer = Tokenizer("google/gemma-3-1b")
+        tokens = tokenizer.tokenize("test")
+        self.assertEqual(tokens, [100, 200, 1])
 
     @patch("gpt_tokenizers.AutoProcessor")
     def test_processor_decode(self, mock_auto_processor):
