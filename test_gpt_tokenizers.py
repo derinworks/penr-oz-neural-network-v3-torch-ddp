@@ -160,12 +160,32 @@ class TestProcessorTokenizer(unittest.TestCase):
         self.assertEqual(tokens, [100, 200, 1])
 
     @patch("gpt_tokenizers.AutoProcessor")
-    def test_processor_decode(self, mock_auto_processor):
+    def test_decode_with_chat_template_uses_parse_response(self, mock_auto_processor):
+        """When chat template is active, decode calls proc.decode + proc.parse_response."""
         mock_proc = MagicMock()
-        mock_proc.tokenizer.decode.side_effect = lambda tokens: "Hello world"
+        mock_proc.tokenizer.chat_template = "{% for m in messages %}..."
+        mock_proc.decode.return_value = "<start>Hello world<end>"
+        mock_proc.parse_response.return_value = "Hello world"
         mock_auto_processor.from_pretrained.return_value = mock_proc
 
         tokenizer = Tokenizer("google/gemma-4-E2B")
+        decoded = tokenizer.decode([100, 200])
+
+        self.assertEqual(decoded, "Hello world")
+        mock_proc.decode.assert_called_once_with([100, 200], skip_special_tokens=False)
+        mock_proc.parse_response.assert_called_once_with("<start>Hello world<end>")
+
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_decode_without_chat_template_uses_tokenizer(self, mock_auto_processor):
+        """Without chat template, decode uses tokenizer.decode directly."""
+        mock_proc = MagicMock()
+        mock_proc.chat_template = None
+        mock_proc.tokenizer.chat_template = None
+        mock_proc.tokenizer.eos_token_id = 1
+        mock_proc.tokenizer.decode.return_value = "Hello world"
+        mock_auto_processor.from_pretrained.return_value = mock_proc
+
+        tokenizer = Tokenizer("google/gemma-3-1b")
         decoded = tokenizer.decode([100, 200])
         self.assertEqual(decoded, "Hello world")
 
