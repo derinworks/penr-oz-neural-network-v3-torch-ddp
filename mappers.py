@@ -188,17 +188,31 @@ class Mapper:
         n_layer = n_layer_override if n_layer_override is not None else text_config.num_hidden_layers
         intermediate_size = getattr(text_config, "intermediate_size", 4 * n_embd)
         rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-6)
-        rope_theta = getattr(text_config, "rope_theta", None)
-        if rope_theta is None:
-            rope_scaling = getattr(text_config, "rope_scaling", None)
-            if isinstance(rope_scaling, dict) and "sliding_attention" in rope_scaling:
-                rope_theta = rope_scaling["sliding_attention"].get("rope_theta", 10000.0)
-            else:
-                rope_theta = 10000.0
+        # Per-attention-type RoPE base: Gemma 3n/4 heterogeneous models use
+        # different rope_theta for sliding vs full attention layers (e.g.
+        # 10_000 local / 1_000_000 global).  Prefer dedicated config attrs
+        # (`rope_theta` = full, `rope_local_base_freq` = sliding); fall back
+        # to a `rope_scaling` dict keyed by attention type; finally default
+        # to 10_000 when nothing is configured.
+        rope_theta_full = getattr(text_config, "rope_theta", None)
+        rope_theta_local = getattr(text_config, "rope_local_base_freq", None)
+        rope_scaling = getattr(text_config, "rope_scaling", None)
+        if isinstance(rope_scaling, dict):
+            if rope_theta_full is None and "full_attention" in rope_scaling:
+                rope_theta_full = rope_scaling["full_attention"].get("rope_theta")
+            if rope_theta_local is None and "sliding_attention" in rope_scaling:
+                rope_theta_local = rope_scaling["sliding_attention"].get("rope_theta")
+        if rope_theta_full is None and rope_theta_local is None:
+            rope_theta_full = rope_theta_local = 10000.0
+        elif rope_theta_full is None:
+            rope_theta_full = rope_theta_local
+        elif rope_theta_local is None:
+            rope_theta_local = rope_theta_full
         attn_dropout = getattr(text_config, "attention_dropout", 0.0)
         activation = (getattr(text_config, "hidden_activation", None)
                       or getattr(text_config, "hidden_act", "gelu_pytorch_tanh"))
         has_post_norms = model_type != "gemma"
+        has_qk_norm = model_type != "gemma"
         # Gemma 2 applies post-norm to branch output before residual add;
         # Gemma 3+ applies post-norm after residual add.
         post_norm_on_residual = model_type != "gemma2"
@@ -210,6 +224,16 @@ class Mapper:
         use_double_wide_mlp = getattr(text_config, "use_double_wide_mlp", False)
         num_kv_shared = getattr(text_config, "num_kv_shared_layers", 0) or 0
         first_kv_shared = n_layer - num_kv_shared if num_kv_shared > 0 else n_layer
+        kv_ref_layer = {}
+        if num_kv_shared > 0 and layer_types and len(layer_types) >= n_layer:
+            prev_layers = list(layer_types[:first_kv_shared])
+            for i in range(first_kv_shared, n_layer):
+                lt = layer_types[i]
+                try:
+                    ref = len(prev_layers) - 1 - prev_layers[::-1].index(lt)
+                    kv_ref_layer[i] = ref
+                except ValueError:
+                    pass
 
         layers: list[dict] = [
             {"scaledembedding": {
@@ -225,6 +249,7 @@ class Mapper:
                             and layer_types[i] == "full_attention")
             layer_head_dim = global_head_dim if is_full_attn else head_dim
             layer_kv_heads = n_global_kv_heads if is_full_attn else n_kv_heads
+            layer_rope_theta = rope_theta_full if is_full_attn else rope_theta_local
             qkv_dim = n_head * layer_head_dim + 2 * layer_kv_heads * layer_head_dim
             attn_out_dim = n_head * layer_head_dim
 
@@ -232,13 +257,20 @@ class Mapper:
             is_kv_shared = i >= first_kv_shared
             layer_intermediate = intermediate_size * 2 if (use_double_wide_mlp and is_kv_shared) else intermediate_size
 
+            attn_args = {"num_heads": n_head, "num_kv_heads": layer_kv_heads,
+                        "dropout": attn_dropout, "rope_theta": layer_rope_theta,
+                        "head_dim": layer_head_dim}
+            if has_qk_norm:
+                attn_args["q_norm"] = {"rmsnorm": {"normalized_shape": layer_head_dim, "eps": rms_norm_eps}}
+                attn_args["k_norm"] = {"rmsnorm": {"normalized_shape": layer_head_dim, "eps": rms_norm_eps}}
+            if i in kv_ref_layer:
+                attn_args["kv_shared_layer_idx"] = kv_ref_layer[i]
+
             block: dict = {
                 "attn_block": {"sequential": [
                     {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
                     {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
-                    {"attention": {"num_heads": n_head, "num_kv_heads": layer_kv_heads,
-                                   "dropout": attn_dropout, "rope_theta": rope_theta,
-                                   "head_dim": layer_head_dim}},
+                    {"attention": attn_args},
                     {"linear": {"in_features": attn_out_dim, "out_features": n_embd, "bias": False}},
                 ]},
                 "mlp_block": {"sequential": [
@@ -419,6 +451,11 @@ class Mapper:
 
             # Output projection
             mapped[f"layers.{block_idx}.attn_block.3.weight"] = hf_sd[f"{hf}.self_attn.o_proj.weight"]
+
+            # Q/K norms (Gemma 2+)
+            if has_post_norms:
+                mapped[f"layers.{block_idx}.attn_block.2.q_norm.weight"] = hf_sd[f"{hf}.self_attn.q_norm.weight"] + 1
+                mapped[f"layers.{block_idx}.attn_block.2.k_norm.weight"] = hf_sd[f"{hf}.self_attn.k_norm.weight"] + 1
 
             if has_post_norms:
                 mapped[f"layers.{block_idx}.post_attn_norm.weight"] = (
