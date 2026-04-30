@@ -28,10 +28,22 @@ class Tokenizer:
             elif getattr(proc, "chat_template", None):
                 chat_host = proc
             if chat_host is not None:
-                self._tokenize = lambda text: chat_host.apply_chat_template(
-                    [{"role": "user", "content": text}],
-                    tokenize=True, add_generation_prompt=True,
-                )
+                def _tokenize_with_template(text):
+                    result = chat_host.apply_chat_template(
+                        [{"role": "user", "content": text}],
+                        tokenize=True, add_generation_prompt=True,
+                    )
+                    # Processors may return a BatchEncoding/dict with input_ids + attention_mask
+                    if isinstance(result, dict) or hasattr(result, "input_ids"):
+                        ids = result["input_ids"]
+                        # Strip batch dim if present (tensor of shape [1, seq] or list[list])
+                        if hasattr(ids, "tolist"):
+                            ids = ids.tolist()
+                        if ids and isinstance(ids[0], list):
+                            ids = ids[0]
+                        return ids
+                    return result
+                self._tokenize = _tokenize_with_template
                 self._decode = lambda tokens: proc.parse_response(
                     proc.decode(tokens, skip_special_tokens=False)
                 )

@@ -128,11 +128,10 @@ class TestProcessorTokenizer(unittest.TestCase):
     Tokenization applies the chat template so the model sees correctly formatted input."""
 
     @patch("gpt_tokenizers.AutoProcessor")
-    def test_apply_chat_template_called(self, mock_auto_processor):
+    def test_apply_chat_template_returns_list(self, mock_auto_processor):
         mock_proc = MagicMock()
         mock_proc.tokenizer.chat_template = "{% for m in messages %}..."
         mock_proc.tokenizer.apply_chat_template.return_value = [2, 100, 200, 300]
-        mock_proc.tokenizer.decode.side_effect = lambda tokens: "Hello"
         mock_auto_processor.from_pretrained.return_value = mock_proc
 
         tokenizer = Tokenizer("google/gemma-4-E2B")
@@ -144,6 +143,38 @@ class TestProcessorTokenizer(unittest.TestCase):
             tokenize=True, add_generation_prompt=True,
         )
         mock_auto_processor.from_pretrained.assert_called_once_with("google/gemma-4-E2B")
+
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_apply_chat_template_returns_dict(self, mock_auto_processor):
+        """Processors may return a dict with input_ids and attention_mask."""
+        mock_proc = MagicMock()
+        mock_proc.tokenizer.chat_template = "{% for m in messages %}..."
+        mock_proc.tokenizer.apply_chat_template.return_value = {
+            "input_ids": [2, 100, 200, 300],
+            "attention_mask": [1, 1, 1, 1],
+        }
+        mock_auto_processor.from_pretrained.return_value = mock_proc
+
+        tokenizer = Tokenizer("google/gemma-4-E2B")
+        tokens = tokenizer.tokenize("Hello world")
+
+        self.assertEqual(tokens, [2, 100, 200, 300])
+
+    @patch("gpt_tokenizers.AutoProcessor")
+    def test_apply_chat_template_returns_batched_dict(self, mock_auto_processor):
+        """Processors may return batched input_ids (shape [1, seq])."""
+        mock_proc = MagicMock()
+        mock_proc.tokenizer.chat_template = "{% for m in messages %}..."
+        mock_proc.tokenizer.apply_chat_template.return_value = {
+            "input_ids": [[2, 100, 200, 300]],
+            "attention_mask": [[1, 1, 1, 1]],
+        }
+        mock_auto_processor.from_pretrained.return_value = mock_proc
+
+        tokenizer = Tokenizer("google/gemma-4-E2B")
+        tokens = tokenizer.tokenize("Hello world")
+
+        self.assertEqual(tokens, [2, 100, 200, 300])
 
     @patch("gpt_tokenizers.AutoProcessor")
     def test_no_chat_template_falls_back_to_encode(self, mock_auto_processor):
