@@ -212,6 +212,7 @@ class Mapper:
         activation = (getattr(text_config, "hidden_activation", None)
                       or getattr(text_config, "hidden_act", "gelu_pytorch_tanh"))
         has_post_norms = model_type != "gemma"
+        has_qk_norm = model_type != "gemma"
         # Gemma 2 applies post-norm to branch output before residual add;
         # Gemma 3+ applies post-norm after residual add.
         post_norm_on_residual = model_type != "gemma2"
@@ -223,6 +224,16 @@ class Mapper:
         use_double_wide_mlp = getattr(text_config, "use_double_wide_mlp", False)
         num_kv_shared = getattr(text_config, "num_kv_shared_layers", 0) or 0
         first_kv_shared = n_layer - num_kv_shared if num_kv_shared > 0 else n_layer
+        kv_ref_layer = {}
+        if num_kv_shared > 0 and layer_types and len(layer_types) >= n_layer:
+            prev_layers = list(layer_types[:first_kv_shared])
+            for i in range(first_kv_shared, n_layer):
+                lt = layer_types[i]
+                try:
+                    ref = len(prev_layers) - 1 - prev_layers[::-1].index(lt)
+                    kv_ref_layer[i] = ref
+                except ValueError:
+                    pass
 
         layers: list[dict] = [
             {"scaledembedding": {
@@ -246,13 +257,20 @@ class Mapper:
             is_kv_shared = i >= first_kv_shared
             layer_intermediate = intermediate_size * 2 if (use_double_wide_mlp and is_kv_shared) else intermediate_size
 
+            attn_args = {"num_heads": n_head, "num_kv_heads": layer_kv_heads,
+                        "dropout": attn_dropout, "rope_theta": layer_rope_theta,
+                        "head_dim": layer_head_dim}
+            if has_qk_norm:
+                attn_args["q_norm"] = {"rmsnorm": {"normalized_shape": layer_head_dim, "eps": rms_norm_eps}}
+                attn_args["k_norm"] = {"rmsnorm": {"normalized_shape": layer_head_dim, "eps": rms_norm_eps}}
+            if i in kv_ref_layer:
+                attn_args["kv_shared_layer_idx"] = kv_ref_layer[i]
+
             block: dict = {
                 "attn_block": {"sequential": [
                     {"rmsnorm": {"normalized_shape": n_embd, "eps": rms_norm_eps}},
                     {"linear": {"in_features": n_embd, "out_features": qkv_dim, "bias": False}},
-                    {"attention": {"num_heads": n_head, "num_kv_heads": layer_kv_heads,
-                                   "dropout": attn_dropout, "rope_theta": layer_rope_theta,
-                                   "head_dim": layer_head_dim}},
+                    {"attention": attn_args},
                     {"linear": {"in_features": attn_out_dim, "out_features": n_embd, "bias": False}},
                 ]},
                 "mlp_block": {"sequential": [
@@ -433,6 +451,11 @@ class Mapper:
 
             # Output projection
             mapped[f"layers.{block_idx}.attn_block.3.weight"] = hf_sd[f"{hf}.self_attn.o_proj.weight"]
+
+            # Q/K norms (Gemma 2+)
+            if has_post_norms:
+                mapped[f"layers.{block_idx}.attn_block.2.q_norm.weight"] = hf_sd[f"{hf}.self_attn.q_norm.weight"] + 1
+                mapped[f"layers.{block_idx}.attn_block.2.k_norm.weight"] = hf_sd[f"{hf}.self_attn.k_norm.weight"] + 1
 
             if has_post_norms:
                 mapped[f"layers.{block_idx}.post_attn_norm.weight"] = (

@@ -423,8 +423,13 @@ class NeuralNetworkModel(nn.Module):
         if not attn_layers:
             return None, pos_embeddings
         cache = create_kv_cache(len(attn_layers))
+        has_kv_sharing = any(
+            getattr(attn, 'kv_shared_layer_idx', None) is not None
+            for attn in attn_layers
+        )
+        kv_share_store = {} if has_kv_sharing else None
         for idx, attn in enumerate(attn_layers):
-            attn.set_kv_cache(cache, idx)
+            attn.set_kv_cache(cache, idx, kv_share_store)
         return cache, pos_embeddings
 
     def _detach_kv_cache(self, pos_embeddings: list[PositionEmbedding] | None = None):

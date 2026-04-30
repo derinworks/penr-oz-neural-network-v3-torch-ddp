@@ -7,28 +7,35 @@ import torch.nn.functional as nnf
 class CausalSelfAttention(nn.Module):
     def __init__(self, num_heads: int, dropout: float=0.0,
                  num_kv_heads: int=None, rope_theta: float=None,
-                 head_dim: int=None):
+                 head_dim: int=None, q_norm: nn.Module=None,
+                 k_norm: nn.Module=None, kv_shared_layer_idx: int=None):
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.dropout = dropout
         self.rope_theta = rope_theta
+        self.q_norm = q_norm
+        self.k_norm = k_norm
+        self.kv_shared_layer_idx = kv_shared_layer_idx
         self._kv_cache = None
         self._layer_idx = 0
+        self._kv_share_store = None
         if rope_theta is not None and head_dim is not None:
             inv_freq = 1.0 / (rope_theta ** (
                 torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim
             ))
             self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def set_kv_cache(self, kv_cache, layer_idx: int):
+    def set_kv_cache(self, kv_cache, layer_idx: int, kv_share_store: dict = None):
         """Attach a KVCache for incremental decoding.
 
         :param kv_cache: KVCache instance (or None to disable).
         :param layer_idx: Layer index within the cache.
+        :param kv_share_store: Optional shared dict for KV-sharing between layers.
         """
         self._kv_cache = kv_cache
         self._layer_idx = layer_idx
+        self._kv_share_store = kv_share_store
 
     @staticmethod
     def _rotate_half(x: Tensor) -> Tensor:
@@ -64,8 +71,19 @@ class CausalSelfAttention(nn.Module):
 
         q, k, v = query_key_value.split([q_dim, kv_dim, kv_dim], dim=2)
         q = q.view(batch_size, block_size, self.num_heads, head_dim).transpose(1, 2)
-        k = k.view(batch_size, block_size, self.num_kv_heads, head_dim).transpose(1, 2)
-        v = v.view(batch_size, block_size, self.num_kv_heads, head_dim).transpose(1, 2)
+
+        if self.kv_shared_layer_idx is not None and self._kv_share_store is not None:
+            k, v = self._kv_share_store[self.kv_shared_layer_idx]
+        else:
+            k = k.view(batch_size, block_size, self.num_kv_heads, head_dim).transpose(1, 2)
+            v = v.view(batch_size, block_size, self.num_kv_heads, head_dim).transpose(1, 2)
+            if self._kv_share_store is not None and self.kv_shared_layer_idx is None:
+                self._kv_share_store[self._layer_idx] = (k, v)
+
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
 
         # Apply rotary position embeddings when enabled
         if self.rope_theta is not None:
