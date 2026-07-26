@@ -481,6 +481,41 @@ class NeuralNetworkModel(nn.Module):
         """Find all PositionEmbedding modules in the model."""
         return [m for m in self.modules() if isinstance(m, PositionEmbedding)]
 
+    def infer_block_size(self) -> int:
+        """Infer the maximum context length (block size) from the model configuration.
+
+        Resolution order:
+          1. Absolute ``PositionEmbedding`` modules (GPT-2 style models): the
+             smallest ``num_embeddings`` caps the usable context length.
+          2. Imported HuggingFace models without absolute position embeddings
+             (e.g. RoPE-based Gemma): ``n_positions`` / ``max_position_embeddings``
+             from the HuggingFace config saved during import.
+
+        :return: Inferred block size (maximum context length)
+        :raises ValueError: when the block size cannot be determined
+        """
+        pos_embeddings = self._find_position_embeddings()
+        if pos_embeddings:
+            block_size = min(int(pos_emb.num_embeddings) for pos_emb in pos_embeddings)
+            log.info(f"Inferred block size {block_size} for model {self.model_id} from position embedding")
+            return block_size
+        hf_config_path = os.path.join(MODELS_FOLDER, f"model_{self.model_id}_hf_config.json")
+        if os.path.exists(hf_config_path):
+            with open(hf_config_path) as f:
+                hf_config: dict = json.load(f)
+            # Multimodal configs (e.g. gemma3, gemma4) nest text params in text_config
+            text_config = hf_config.get("text_config") or {}
+            for config in (text_config, hf_config):
+                for key in ("n_positions", "max_position_embeddings"):
+                    block_size = config.get(key)
+                    if isinstance(block_size, int) and block_size > 0:
+                        log.info(f"Inferred block size {block_size} for model {self.model_id} "
+                                 f"from HuggingFace config {key}")
+                        return block_size
+        raise ValueError(f"Cannot infer block_size for model {self.model_id}: no position embedding layer "
+                         f"or imported HuggingFace config with a maximum context length found. "
+                         f"Please provide block_size explicitly.")
+
     def _attach_kv_cache(self) -> tuple[KVCache | None, list[PositionEmbedding]]:
         """Create and attach a KV cache to all attention layers.
 
