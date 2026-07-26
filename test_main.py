@@ -53,6 +53,21 @@ def test_create_model_endpoint(mock_new_model):
 
     mock_new_model.serialize.assert_called_once()
 
+def test_create_model_endpoint_discards_stale_hf_sidecars():
+    """Creating a model under an imported model's id drops its HuggingFace sidecars."""
+    with patch("main.NeuralNetworkModel") as MockModel:
+        payload = {
+            "model_id": "reused-id",
+            "layers": [{"linear": {"in_features": 9, "out_features": 9}}, {"sigmoid": {}}],
+            "optimizer": {"sgd": {"lr": 0.1}},
+        }
+
+        response = client.post("/model/", json=payload)
+
+        assert response.status_code == 200, response.json()
+        MockModel.discard_hf_artifacts.assert_called_once_with("reused-id")
+        MockModel.return_value.serialize.assert_called_once()
+
 @pytest.mark.parametrize("input_data, target, output, cost", [
     ([0.0, 0.0, 0.0], None, [0.0, 1.0, 0.0], None),
     ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.234),

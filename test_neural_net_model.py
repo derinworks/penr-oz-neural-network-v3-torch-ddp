@@ -922,6 +922,47 @@ class TestNeuralNetModel(unittest.TestCase):
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("test")
 
+    def test_delete_discards_hf_import_sidecars(self):
+        """Deleting a model removes the HuggingFace sidecars so a reused id cannot inherit them."""
+        model_id = "test-delete-sidecars"
+        os.makedirs("models", exist_ok=True)
+        hf_config_path, layers_path = NeuralNetworkModel.get_hf_artifact_paths(model_id)
+        for path in (hf_config_path, layers_path):
+            with open(path, "w") as f:
+                json.dump({"n_positions": 1024}, f)
+
+        # Model file itself was never written; delete must still clear sidecars.
+        NeuralNetworkModel.delete(model_id)
+
+        self.assertFalse(os.path.exists(hf_config_path))
+        self.assertFalse(os.path.exists(layers_path))
+
+    def test_discard_hf_artifacts_is_noop_without_sidecars(self):
+        """Discarding artifacts for a model that was never imported is harmless."""
+        hf_config_path, layers_path = NeuralNetworkModel.get_hf_artifact_paths("test-never-imported")
+        self.assertFalse(os.path.exists(hf_config_path))
+
+        NeuralNetworkModel.discard_hf_artifacts("test-never-imported")
+
+        self.assertFalse(os.path.exists(hf_config_path))
+        self.assertFalse(os.path.exists(layers_path))
+
+    def test_infer_block_size_does_not_use_sidecar_of_deleted_model(self):
+        """A stale sidecar must not survive delete and feed inference for a reused id."""
+        model_id = "test-stale-sidecar"
+        os.makedirs("models", exist_ok=True)
+        hf_config_path, _ = NeuralNetworkModel.get_hf_artifact_paths(model_id)
+        with open(hf_config_path, "w") as f:
+            json.dump({"model_type": "gpt2", "n_positions": 1024}, f)
+
+        NeuralNetworkModel.delete(model_id)
+
+        # Recreate under the same id with a RoPE-style stack (no PositionEmbedding)
+        recreated = NeuralNetworkModel(model_id, Mapper(
+            [{"linear": {"in_features": 4, "out_features": 4}}, {"softmax": {"dim": -1}}], {"sgd": {}}))
+        with self.assertRaises(ValueError):
+            recreated.infer_block_size()
+
     def test_serialize_uses_pickle_protocol_5(self):
         """Serialize uses pickle protocol 5 to support large models with compression."""
         model = NeuralNetworkModel("test_pickle", Mapper(

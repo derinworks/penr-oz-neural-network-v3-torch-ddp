@@ -333,6 +333,9 @@ def create_model(body: CreateModelRequest = Body(...)):
     model_id = body.model_id
     log.info(f"Requesting creation of model {model_id}")
     model = NeuralNetworkModel(model_id, Mapper(body.layers, body.optimizer))
+    # A locally created model claims the id outright: drop any sidecars left by
+    # a previously imported model so block_size is never inferred from them.
+    NeuralNetworkModel.discard_hf_artifacts(model_id)
     model.serialize()
     return {"message": f"Model {model_id} created and saved successfully"}
 
