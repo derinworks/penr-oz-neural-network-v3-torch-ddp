@@ -53,6 +53,21 @@ def test_create_model_endpoint(mock_new_model):
 
     mock_new_model.serialize.assert_called_once()
 
+def test_create_model_endpoint_discards_stale_hf_sidecars():
+    """Creating a model under an imported model's id drops its HuggingFace sidecars."""
+    with patch("main.NeuralNetworkModel") as MockModel:
+        payload = {
+            "model_id": "reused-id",
+            "layers": [{"linear": {"in_features": 9, "out_features": 9}}, {"sigmoid": {}}],
+            "optimizer": {"sgd": {"lr": 0.1}},
+        }
+
+        response = client.post("/model/", json=payload)
+
+        assert response.status_code == 200, response.json()
+        MockModel.discard_hf_artifacts.assert_called_once_with("reused-id")
+        MockModel.return_value.serialize.assert_called_once()
+
 @pytest.mark.parametrize("input_data, target, output, cost", [
     ([0.0, 0.0, 0.0], None, [0.0, 1.0, 0.0], None),
     ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.234),
@@ -128,6 +143,49 @@ def test_evaluate_endpoint_with_gzip(mock_deserialized_model):
     }
 
     assert response.status_code == 200
+
+def test_evaluate_endpoint_without_block_size_infers_from_model(mock_deserialized_model):
+    mock_deserialized_model.infer_block_size.return_value = 32
+    mock_deserialized_model.evaluate_model.return_value = 1.234
+
+    payload = {
+        "model_id": "test",
+        "dataset_id": "mock_ds",
+        "shard": 0,
+        "epochs": 2,
+        "batch_size": 2,
+        "step_size": 1,
+    }
+
+    response = client.post("/evaluate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"cost": 1.234}
+    mock_deserialized_model.infer_block_size.assert_called_once_with()
+    mock_deserialized_model.evaluate_model.assert_called_once_with(
+        "mock_ds", None, 0, 2, 2, 32, 1
+    )
+
+def test_evaluate_endpoint_with_block_size_skips_inference(mock_deserialized_model):
+    mock_deserialized_model.evaluate_model.return_value = 1.234
+
+    payload = {
+        "model_id": "test",
+        "dataset_id": "mock_ds",
+        "shard": 0,
+        "epochs": 2,
+        "batch_size": 2,
+        "block_size": 16,
+        "step_size": 1,
+    }
+
+    response = client.post("/evaluate/", json=payload)
+
+    assert response.status_code == 200
+    mock_deserialized_model.infer_block_size.assert_not_called()
+    mock_deserialized_model.evaluate_model.assert_called_once_with(
+        "mock_ds", None, 0, 2, 2, 16, 1
+    )
 
 @pytest.mark.parametrize("input_context, block_size, max_new_tokens, tokens", [
     ([[0]], 8, 2, [0, 1, 2]),
@@ -239,6 +297,78 @@ def test_generate_stream_endpoint_with_stop_token(mock_deserialized_model, input
     mock_deserialized_model.generate_tokens_stream.assert_called_once_with(
         input_context, block_size, max_new_tokens, 1.0, None, stop_token, None
     )
+
+def test_generate_endpoint_without_block_size_infers_from_model(mock_deserialized_model):
+    mock_deserialized_model.infer_block_size.return_value = 16
+    mock_deserialized_model.generate_tokens.return_value = [0, 1, 2]
+
+    payload = {
+        "model_id": "test",
+        "input": [[0]],
+        "max_new_tokens": 2,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"tokens": [0, 1, 2]}
+    mock_deserialized_model.infer_block_size.assert_called_once_with()
+    mock_deserialized_model.generate_tokens.assert_called_once_with(
+        [[0]], 16, 2, 1.0, None, None, None
+    )
+
+def test_generate_stream_endpoint_without_block_size_infers_from_model(mock_deserialized_model):
+    mock_deserialized_model.infer_block_size.return_value = 8
+    mock_deserialized_model.generate_tokens_stream.return_value = iter([1, 2])
+
+    payload = {
+        "model_id": "test",
+        "input": [[0]],
+        "max_new_tokens": 2,
+        "stream": True,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    assert response.text == "1\n2\n"
+    mock_deserialized_model.infer_block_size.assert_called_once_with()
+    mock_deserialized_model.generate_tokens_stream.assert_called_once_with(
+        [[0]], 8, 2, 1.0, None, None, None
+    )
+
+def test_generate_endpoint_with_block_size_skips_inference(mock_deserialized_model):
+    mock_deserialized_model.generate_tokens.return_value = [0, 1]
+
+    payload = {
+        "model_id": "test",
+        "input": [[0]],
+        "block_size": 4,
+        "max_new_tokens": 1,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 200
+    mock_deserialized_model.infer_block_size.assert_not_called()
+    mock_deserialized_model.generate_tokens.assert_called_once_with(
+        [[0]], 4, 1, 1.0, None, None, None
+    )
+
+def test_generate_endpoint_block_size_inference_failure_returns_400(mock_deserialized_model):
+    mock_deserialized_model.infer_block_size.side_effect = ValueError("Cannot infer block_size for model test")
+
+    payload = {
+        "model_id": "test",
+        "input": [[0]],
+        "max_new_tokens": 2,
+    }
+
+    response = client.post("/generate/", json=payload)
+
+    assert response.status_code == 400
+    assert "Cannot infer block_size for model test" in response.json()["detail"]
+    mock_deserialized_model.generate_tokens.assert_not_called()
 
 @patch("main.create_task")
 def test_train_endpoint(mock_create_task, mock_deserialized_model):

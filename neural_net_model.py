@@ -98,6 +98,39 @@ class NeuralNetworkModel(nn.Module):
     def get_model_path(cls, model_id):
         return os.path.join(MODELS_FOLDER, f"model_{model_id}.pth")
 
+    @classmethod
+    def get_hf_artifact_paths(cls, model_id: str) -> list[str]:
+        """Paths of the JSON sidecars written when a model is imported from HuggingFace.
+
+        These belong to the imported model alone, so they must not outlive it:
+        ``infer_block_size`` reads the config sidecar, and a leftover sidecar
+        would otherwise report the previous model's context length after the id
+        is deleted or reclaimed by a locally created model.
+
+        :param model_id: Model id the artifacts belong to.
+        :return: Sidecar paths (they may or may not exist on disk).
+        """
+        return [
+            os.path.join(MODELS_FOLDER, f"model_{model_id}_hf_config.json"),
+            os.path.join(MODELS_FOLDER, f"model_{model_id}_layers.json"),
+        ]
+
+    @classmethod
+    def discard_hf_artifacts(cls, model_id: str):
+        """Remove any HuggingFace import sidecars left over for ``model_id``.
+
+        Called whenever the id stops belonging to an imported model — on delete
+        and when a locally created model claims the same id.  The downloaded
+        weights directory is deliberately kept: it is a download cache, not a
+        description of the stored model.
+
+        :param model_id: Model id whose import sidecars should be discarded.
+        """
+        for path in cls.get_hf_artifact_paths(model_id):
+            if os.path.exists(path):
+                os.remove(path)
+                log.info(f"Discarded stale HuggingFace artifact {path}")
+
     def serialize(self):
         os.makedirs(MODELS_FOLDER, exist_ok=True)
         os.makedirs(os.path.join(self.SHM_PATH, MODELS_FOLDER), exist_ok=True)
@@ -199,7 +232,7 @@ class NeuralNetworkModel(nn.Module):
         log.info(f"Fetching HuggingFace config for {hf_repo_id} (revision={revision})")
         hf_config = AutoConfig.from_pretrained(hf_repo_id, revision=revision)
         os.makedirs(MODELS_FOLDER, exist_ok=True)
-        hf_config_path = os.path.join(MODELS_FOLDER, f"model_{model_id}_hf_config.json")
+        hf_config_path, layers_path = cls.get_hf_artifact_paths(model_id)
         with open(hf_config_path, "w") as f:
             json.dump(hf_config.to_dict(), f, indent=2)
         log.info(f"HuggingFace config for {hf_repo_id} written to {hf_config_path}")
@@ -221,7 +254,6 @@ class NeuralNetworkModel(nn.Module):
         log.info(f"Detected {n_layer} transformer layers from HuggingFace state dict")
 
         layers_config = Mapper.from_hf_config(hf_config, n_layer_override=n_layer)
-        layers_path = os.path.join(MODELS_FOLDER, f"model_{model_id}_layers.json")
         with open(layers_path, "w") as f:
             json.dump(layers_config, f, indent=2)
         log.info(f"Mapped layers config written to {layers_path}")
@@ -269,6 +301,10 @@ class NeuralNetworkModel(nn.Module):
                 os.remove(model_path)
         except FileNotFoundError as e:
             log.warning(f"Failed to delete: {str(e)}")
+        finally:
+            # Always drop the import sidecars, even when the model file was
+            # already gone, so a re-created model never inherits them.
+            cls.discard_hf_artifacts(model_id)
 
     def _wire_kv_sharing(self):
         """Wire KV-shared attention layers to their reference layers.
@@ -480,6 +516,41 @@ class NeuralNetworkModel(nn.Module):
     def _find_position_embeddings(self) -> list[PositionEmbedding]:
         """Find all PositionEmbedding modules in the model."""
         return [m for m in self.modules() if isinstance(m, PositionEmbedding)]
+
+    def infer_block_size(self) -> int:
+        """Infer the maximum context length (block size) from the model configuration.
+
+        Resolution order:
+          1. Absolute ``PositionEmbedding`` modules (GPT-2 style models): the
+             smallest ``num_embeddings`` caps the usable context length.
+          2. Imported HuggingFace models without absolute position embeddings
+             (e.g. RoPE-based Gemma): ``n_positions`` / ``max_position_embeddings``
+             from the HuggingFace config saved during import.
+
+        :return: Inferred block size (maximum context length)
+        :raises ValueError: when the block size cannot be determined
+        """
+        pos_embeddings = self._find_position_embeddings()
+        if pos_embeddings:
+            block_size = min(int(pos_emb.num_embeddings) for pos_emb in pos_embeddings)
+            log.info(f"Inferred block size {block_size} for model {self.model_id} from position embedding")
+            return block_size
+        hf_config_path, _ = self.get_hf_artifact_paths(self.model_id)
+        if os.path.exists(hf_config_path):
+            with open(hf_config_path) as f:
+                hf_config: dict = json.load(f)
+            # Multimodal configs (e.g. gemma3, gemma4) nest text params in text_config
+            text_config = hf_config.get("text_config") or {}
+            for config in (text_config, hf_config):
+                for key in ("n_positions", "max_position_embeddings"):
+                    block_size = config.get(key)
+                    if isinstance(block_size, int) and block_size > 0:
+                        log.info(f"Inferred block size {block_size} for model {self.model_id} "
+                                 f"from HuggingFace config {key}")
+                        return block_size
+        raise ValueError(f"Cannot infer block_size for model {self.model_id}: no position embedding layer "
+                         f"or imported HuggingFace config with a maximum context length found. "
+                         f"Please provide block_size explicitly.")
 
     def _attach_kv_cache(self) -> tuple[KVCache | None, list[PositionEmbedding]]:
         """Create and attach a KV cache to all attention layers.
