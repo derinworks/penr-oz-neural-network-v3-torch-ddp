@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import os.path
@@ -259,6 +260,59 @@ class TestNeuralNetModel(unittest.TestCase):
         self.assertGreaterEqual(len(tokens), block_size)
         self.assertLessEqual(len(tokens), len(input_context[0]) + max_new_tokens)
         self.assertFalse(model.layers.training)
+
+    def test_infer_block_size_from_position_embedding(self):
+        layers = [{"summation": [{"embedding": {"num_embeddings": 27, "embedding_dim": 4}},
+                                 {"position": {"num_embeddings": 8, "embedding_dim": 4}}]},
+                  {"linear": {"in_features": 4, "out_features": 27, "bias": False}},
+                  {"softmaxlast": {"dim": -1}}]
+        model = NeuralNetworkModel("test", Mapper(layers, {"sgd": {}}))
+
+        self.assertEqual(8, model.infer_block_size())
+
+    def test_infer_block_size_without_position_embedding_raises(self):
+        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"softmax": {"dim": -1}}]
+        model = NeuralNetworkModel("test-no-pos-emb", Mapper(layers, {"sgd": {}}))
+
+        with self.assertRaises(ValueError) as ctx:
+            model.infer_block_size()
+
+        self.assertIn("Cannot infer block_size", str(ctx.exception))
+        self.assertIn("test-no-pos-emb", str(ctx.exception))
+
+    @parameterized.expand([
+        ("n_positions", {"n_positions": 1024}, 1024),
+        ("max_position_embeddings", {"max_position_embeddings": 2048}, 2048),
+        ("nested_text_config", {"text_config": {"max_position_embeddings": 4096}}, 4096),
+        ("text_config_precedes_top_level", {"text_config": {"max_position_embeddings": 512},
+                                            "max_position_embeddings": 4096}, 512),
+    ])
+    def test_infer_block_size_from_hf_config(self, _name, hf_config: dict, expected_block_size: int):
+        model_id = f"test-hf-cfg-{_name}"
+        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"softmax": {"dim": -1}}]
+        model = NeuralNetworkModel(model_id, Mapper(layers, {"sgd": {}}))
+        os.makedirs("models", exist_ok=True)
+        hf_config_path = os.path.join("models", f"model_{model_id}_hf_config.json")
+        with open(hf_config_path, "w") as f:
+            json.dump(hf_config, f)
+        try:
+            self.assertEqual(expected_block_size, model.infer_block_size())
+        finally:
+            os.remove(hf_config_path)
+
+    def test_infer_block_size_hf_config_without_context_length_raises(self):
+        model_id = "test-hf-cfg-empty"
+        layers = [{"linear": {"in_features": 4, "out_features": 4}}, {"softmax": {"dim": -1}}]
+        model = NeuralNetworkModel(model_id, Mapper(layers, {"sgd": {}}))
+        os.makedirs("models", exist_ok=True)
+        hf_config_path = os.path.join("models", f"model_{model_id}_hf_config.json")
+        with open(hf_config_path, "w") as f:
+            json.dump({"model_type": "gemma3", "text_config": {"hidden_size": 32}}, f)
+        try:
+            with self.assertRaises(ValueError):
+                model.infer_block_size()
+        finally:
+            os.remove(hf_config_path)
 
     @parameterized.expand([
         ([{"embedding": {"num_embeddings": 18, "embedding_dim": 2}}, {"flatten": {}},
@@ -867,6 +921,47 @@ class TestNeuralNetModel(unittest.TestCase):
         NeuralNetworkModel.delete("test")
         with self.assertRaises(KeyError):
             NeuralNetworkModel.deserialize("test")
+
+    def test_delete_discards_hf_import_sidecars(self):
+        """Deleting a model removes the HuggingFace sidecars so a reused id cannot inherit them."""
+        model_id = "test-delete-sidecars"
+        os.makedirs("models", exist_ok=True)
+        hf_config_path, layers_path = NeuralNetworkModel.get_hf_artifact_paths(model_id)
+        for path in (hf_config_path, layers_path):
+            with open(path, "w") as f:
+                json.dump({"n_positions": 1024}, f)
+
+        # Model file itself was never written; delete must still clear sidecars.
+        NeuralNetworkModel.delete(model_id)
+
+        self.assertFalse(os.path.exists(hf_config_path))
+        self.assertFalse(os.path.exists(layers_path))
+
+    def test_discard_hf_artifacts_is_noop_without_sidecars(self):
+        """Discarding artifacts for a model that was never imported is harmless."""
+        hf_config_path, layers_path = NeuralNetworkModel.get_hf_artifact_paths("test-never-imported")
+        self.assertFalse(os.path.exists(hf_config_path))
+
+        NeuralNetworkModel.discard_hf_artifacts("test-never-imported")
+
+        self.assertFalse(os.path.exists(hf_config_path))
+        self.assertFalse(os.path.exists(layers_path))
+
+    def test_infer_block_size_does_not_use_sidecar_of_deleted_model(self):
+        """A stale sidecar must not survive delete and feed inference for a reused id."""
+        model_id = "test-stale-sidecar"
+        os.makedirs("models", exist_ok=True)
+        hf_config_path, _ = NeuralNetworkModel.get_hf_artifact_paths(model_id)
+        with open(hf_config_path, "w") as f:
+            json.dump({"model_type": "gpt2", "n_positions": 1024}, f)
+
+        NeuralNetworkModel.delete(model_id)
+
+        # Recreate under the same id with a RoPE-style stack (no PositionEmbedding)
+        recreated = NeuralNetworkModel(model_id, Mapper(
+            [{"linear": {"in_features": 4, "out_features": 4}}, {"softmax": {"dim": -1}}], {"sgd": {}}))
+        with self.assertRaises(ValueError):
+            recreated.infer_block_size()
 
     def test_serialize_uses_pickle_protocol_5(self):
         """Serialize uses pickle protocol 5 to support large models with compression."""

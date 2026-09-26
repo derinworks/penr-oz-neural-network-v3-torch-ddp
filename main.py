@@ -171,6 +171,12 @@ class EvaluateRequest(TrainingRequest):
         examples=[2],
         description="The number of evaluation epochs"
     )
+    block_size: int | None = Field(
+        None,
+        examples=[1024],
+        description="The block size (or sequence length) of each single sample entry in a batch; "
+                    "inferred from the selected model when omitted"
+    )
     step_size: int = Field(
         ...,
         examples=[1],
@@ -218,10 +224,10 @@ class GenerateRequest(ModelOnDeviceRequest):
         ],
         description="The initial input context"
     )
-    block_size: int = Field(
-        ...,
+    block_size: int | None = Field(
+        None,
         examples=[1024],
-        description="The block size of context"
+        description="The block size of context; inferred from the selected model when omitted"
     )
     max_new_tokens: int = Field(
         ...,
@@ -327,6 +333,9 @@ def create_model(body: CreateModelRequest = Body(...)):
     model_id = body.model_id
     log.info(f"Requesting creation of model {model_id}")
     model = NeuralNetworkModel(model_id, Mapper(body.layers, body.optimizer))
+    # A locally created model claims the id outright: drop any sidecars left by
+    # a previously imported model so block_size is never inferred from them.
+    NeuralNetworkModel.discard_hf_artifacts(model_id)
     model.serialize()
     return {"message": f"Model {model_id} created and saved successfully"}
 
@@ -419,8 +428,9 @@ def evaluate_model(body: EvaluateRequest = Body(...)):
     model_id = body.model_id
     log.info(f"Requesting evaluation of model {model_id}")
     model = NeuralNetworkModel.deserialize(model_id)
+    block_size = body.block_size if body.block_size is not None else model.infer_block_size()
     cost = model.evaluate_model(body.dataset_id, body.target_dataset_id, body.shard,
-                                body.epochs, body.batch_size, body.block_size, body.step_size)
+                                body.epochs, body.batch_size, block_size, body.step_size)
     return {"cost": cost}
 
 @app.post("/generate/")
@@ -430,15 +440,16 @@ def model_generate(body: GenerateRequest = Body(...)):
     log.info(f"Generating tokens using model {model_id} on device {device}")
     model = NeuralNetworkModel.deserialize(model_id)
     model.to(device=device)
+    block_size = body.block_size if body.block_size is not None else model.infer_block_size()
     if body.stream:
         log.info(f"Streaming token generation for model {model_id}")
         def token_stream():
-            for token in model.generate_tokens_stream(body.input, body.block_size, body.max_new_tokens,
+            for token in model.generate_tokens_stream(body.input, block_size, body.max_new_tokens,
                                                       body.temperature, body.top_k, body.stop_token,
                                                       body.top_p):
                 yield f"{token}\n"
         return StreamingResponse(token_stream(), media_type="text/plain")
-    generated_tokens = model.generate_tokens(body.input, body.block_size, body.max_new_tokens,
+    generated_tokens = model.generate_tokens(body.input, block_size, body.max_new_tokens,
                                              body.temperature, body.top_k, body.stop_token,
                                              body.top_p)
     return {"tokens": generated_tokens}

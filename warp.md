@@ -170,12 +170,12 @@ curl -X POST http://127.0.0.1:8000/decode/ \
 
 ### Training & Evaluation
 - `PUT /train/` - Train model (asynchronous, uses DDP)
-- `POST /evaluate/` - Evaluate model on dataset
+- `POST /evaluate/` - Evaluate model on dataset (`block_size` optional; inferred from the model when omitted)
 - `POST /output/` - Compute model output for given input
 
 ### Text Generation
 - `POST /tokenize/` - Tokenize text
-- `POST /generate/` - Generate tokens from model
+- `POST /generate/` - Generate tokens from model (`block_size` optional; inferred from the model when omitted)
 - `POST /decode/` - Decode tokens to text
 
 ## Testing
